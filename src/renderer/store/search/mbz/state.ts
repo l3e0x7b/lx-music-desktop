@@ -1,4 +1,5 @@
 import { reactive } from '@common/utils/vueTools'
+import type { MbzArtist } from '@renderer/utils/musicBrainz'
 
 export declare interface MbzListInfo {
   list: LX.Music.MusicInfo[]
@@ -46,9 +47,25 @@ export const searchState: MbzSearchState = reactive({
   },
 })
 
+export declare interface MbzArtistChoiceState {
+  /** 是否显示艺术家选择下拉（重名候选） */
+  visible: boolean
+  /** 重名候选（rank>=2，已按 rank→score 排序，名称全等者排前） */
+  candidates: MbzArtist[]
+  /** 等待 UI 端回调（resolveArtistChoice）；null=当前无待选 */
+  resolve: ((artist: MbzArtist | null) => void) | null
+}
+
+/** 艺术家选择下拉状态：重名时由 action.openArtistChoice 写入、UI 端 resolveArtistChoice 结算 */
+export const artistChoiceState: MbzArtistChoiceState = reactive({
+  visible: false,
+  candidates: [],
+  resolve: null,
+})
+
 export const reset = () => {
   listInfo.list = []
-  listInfo.page = 0
+  listInfo.page = 1
   listInfo.maxPage = 0
   listInfo.total = 0
   listInfo.key = null

@@ -159,6 +159,18 @@ const apiFetch = async(url: string, retryNum = 0, timeout = TIMEOUT): Promise<an
 export interface MbzArtist {
   id: string
   name: string
+  /** 排序名（Sort name，如 "Wong, Faye"） */
+  sortName: string
+  /** 类型（Person/Group 等） */
+  type: string
+  /** 性别（首字母大写，如 Female/Male） */
+  gender: string
+  /** 地区名（如 Hong Kong/Taiwan） */
+  area: string
+  /** 出道/成立时间（life-span.begin 或 begin.year，如 1969-08-08 / 1930） */
+  begin: string
+  /** 匹配得分：名称全等 +3 / 名称包含 +1 / 别名全等 +2 / 别名包含 +1；rank>=2 视为与搜索词全等命中（重名判定用） */
+  rank: number
 }
 
 /** 标题兜底：仅保留非空检查——MV/花絮轨亦按原始数据如实展示
@@ -284,13 +296,20 @@ export const findArtistCandidates = async(artistName: string): Promise<MbzArtist
       else if (lowerName.includes(target)) rank += 1
       if (aliases.some(alias => alias.toLowerCase() == target)) rank += 2
       else if (aliases.some(alias => alias.toLowerCase().includes(target))) rank += 1
+      const gender = String(item.gender ?? '')
       const artist: MbzArtist = {
         id: item.id,
         name: item.name,
+        sortName: item['sort-name'] ?? '',
+        type: item.type ?? '',
+        gender: gender ? gender.charAt(0).toUpperCase() + gender.slice(1) : '',
+        area: item.area?.name ?? '',
+        begin: item['life-span']?.begin ?? item.begin?.year ?? '',
+        rank,
       }
-      return { artist, rank, score: item.score ?? 0 }
+      return { artist, score: item.score ?? 0 }
     })
-    .sort((a, b) => b.rank - a.rank || b.score - a.score)
+    .sort((a, b) => b.artist.rank - a.artist.rank || b.score - a.score)
     .map(item => item.artist)
 }
 
@@ -441,7 +460,7 @@ const extractTracks = (group: { id: string, title: string, primaryType: string }
   const albumCredits = (release['artist-credit'] ?? []).filter(credit => credit.artist?.id)
   const albumArtists = albumCredits.map(credit => credit.name).filter(Boolean)
   // 主歌手取专辑主艺术家；合辑（Various Artists）时回退为曲目主唱
-  const albumPrimary = albumArtists.find(name => !isVarious(name)) ?? albumArtists[0] ?? ''
+  const albumPrimary = albumArtists.find(name => !isVarious(name)) ?? ''
   const seen = new Set<string>()
   release.media?.forEach((media, mediaIdx) => {
     // 所有媒体都参与提取（CD+VCD/DVD 合版逐轨展示，配合曲目行 Format 标签）；
@@ -463,7 +482,7 @@ const extractTracks = (group: { id: string, title: string, primaryType: string }
       const trackCredits = (track['artist-credit'] ?? recording['artist-credit'] ?? []).filter(credit => credit.artist?.id)
       const trackArtists = trackCredits.map(credit => credit.name).filter(Boolean)
       const primary = albumPrimary || (trackArtists[0] ?? '')
-      const artists = [primary, ...new Set([...albumArtists, ...trackArtists].filter(name => name != primary))].filter(Boolean)
+      const artists = [primary, ...new Set([...albumArtists, ...trackArtists].filter(name => name != primary && !isVarious(name)))].filter(Boolean)
       if (!artists.length) continue
       // 主歌手 MBID：优先专辑主艺术家，缺失时回退曲目首个署名
       const primaryCredit = albumCredits.find(credit => credit.name == primary) ?? trackCredits.find(credit => credit.name == primary)

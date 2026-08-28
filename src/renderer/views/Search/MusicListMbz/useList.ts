@@ -21,7 +21,7 @@ export default () => {
 
   /**
    * 占位项（MusicBrainz 候选）即时匹配为平台曲目；非占位项原样返回
-   * 曲目行 id 为 mbz__<groupId>__<releaseId>__<recId>，按 id 反查候选（不依赖列表下标，
+   * 曲目行 id 为 mbz__<groupId>__<releaseId>__<mediaIdx>__<recId>，按 id 反查候选（不依赖列表下标，
    * 列表为「组行 + 展开曲目行」动态合成，下标不可信）
    */
   const resolvePlaceholder = async(musicInfo: LX.Music.MusicInfo | undefined): Promise<LX.Music.MusicInfo | null> => {

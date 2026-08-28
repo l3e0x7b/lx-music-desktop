@@ -12,8 +12,8 @@ import {
   type MbzGroupFull,
   type MbzRangeResult,
 } from '@renderer/utils/musicBrainz'
-import { addHistoryWord } from '../action'
-import { listInfo, searchState, reset } from './state'
+import { addHistoryWord, setSearchText } from '../action'
+import { listInfo, searchState, reset, artistChoiceState } from './state'
 
 const pageLimit = 30
 const matchTimeout = 8000
@@ -24,10 +24,15 @@ const ARTIST_CACHE_MAX = 100
 const MATCH_CACHE_MAX = 500
 /** 未收录艺人的负缓存 TTL（短时有效，避免反复搜索同一未收录艺人时重复 /artist 请求） */
 const ARTIST_NEGATIVE_TTL_MS = 10 * 60 * 1000
+/** 艺术家候选正缓存 TTL（与负缓存一致：MB 数据变更后避免长会话内长期使用陈旧候选） */
+const ARTIST_CACHE_TTL_MS = 10 * 60 * 1000
 
 const abortError = () => new DOMException('The operation was aborted', 'AbortError')
 
-const artistCache = new Map<string, MbzArtist>()
+/** 艺术家候选缓存：`关键词 → { 候选数组, 缓存时间 }`（含 rank，重名判定用；超出上限淘汰最早插入项） */
+const artistCandidatesCache = new Map<string, { candidates: MbzArtist[], at: number }>()
+/** 用户已选艺术家记忆：`关键词 → artistId`（同词二次搜索不再弹选择器） */
+const chosenArtistCache = new Map<string, string>()
 /** 播放时匹配结果缓存：`${source}__${candidate.key}` → 平台曲目信息（key 含版本 id，版本切换后独立匹配） */
 const matchCache = new Map<string, LX.Music.MusicInfo>()
 /** 进行中的匹配任务（并发去重） */
@@ -39,15 +44,42 @@ let lastResultKey: string | null = null
 /** 最近一次搜索的源（构建展开曲目行时写入 MusicInfo.source） */
 let lastSource: LX.OnlineSource = 'kw'
 /** 进行中的艺术家查询（并发去重：同一关键词快速连搜只发一次 /artist 请求） */
-const pendingArtist = new Map<string, Promise<MbzArtist | null>>()
+const pendingArtist = new Map<string, Promise<MbzArtist[] | null>>()
 /** 未命中负缓存：`关键词 → 最近查询时间`（避免反复搜索未收录艺人重复打 MB /artist） */
 const artistNegativeCache = new Map<string, number>()
 
 /** 当前搜索的中断控制器：新搜索或组件卸载（切换页面/取消勾选）时中止前一个，停止 MB 拉取与结果缓存 */
 let currentSearchController: AbortController | null = null
 
+/**
+ * 打开艺术家选择下拉（重名候选）：写入 artistChoiceState，等待 UI 端 resolveArtistChoice 结算
+ * @returns 用户选择的艺术家；null=用户取消（外部点击关闭弹窗）
+ */
+const openArtistChoice = async(candidates: MbzArtist[]): Promise<MbzArtist | null> => {
+  return new Promise(resolve => {
+    artistChoiceState.candidates = candidates
+    artistChoiceState.resolve = resolve
+    artistChoiceState.visible = true
+  })
+}
+
+/** 关闭艺术家选择下拉并返回结果（artist=null 表示取消） */
+export const resolveArtistChoice = (artist: MbzArtist | null) => {
+  if (!artistChoiceState.visible) return
+  artistChoiceState.visible = false
+  artistChoiceState.resolve?.(artist)
+  artistChoiceState.resolve = null
+  artistChoiceState.candidates = []
+}
+
+/** 关闭艺术家选择下拉（取消）：新搜索/清空搜索框/中止时调用，避免旧 promise 悬挂与弹窗残留 */
+export const closeArtistChoice = () => {
+  resolveArtistChoice(null)
+}
+
 /** 中止当前 mbz 搜索（组件卸载时调用；中止后不更新 UI、不写缓存） */
 export const abortSearch = () => {
+  closeArtistChoice()
   currentSearchController?.abort()
 }
 
@@ -268,16 +300,17 @@ export const findCandidate = (id: string): MbzCandidate | null => {
 }
 
 /**
- * 按关键词查艺术家（内存正缓存 + 负缓存 + in-flight 并发去重，缓存上限淘汰最旧）
+ * 按关键词查艺术家候选数组（正缓存 + 负缓存 + in-flight 并发去重，缓存上限淘汰最旧）
+ * @returns 候选数组（含 rank，已按 rank→score 排序，供重名判定与选择器使用）；null=查无此艺人（负缓存）
  * @param signal 可选中断信号：中止时在请求边界静默抛 AbortError（不写缓存），
  * 由调用方（action.search）统一处理；已被接受的中断请求本身会继续跑完
  */
-const findArtistWithDedup = async(text: string, signal?: AbortSignal): Promise<MbzArtist | null> => {
+const getArtistCandidates = async(text: string, signal?: AbortSignal): Promise<MbzArtist[] | null> => {
   if (signal?.aborted) throw abortError()
-  const cached = artistCache.get(text)
-  if (cached) {
+  const cached = artistCandidatesCache.get(text)
+  if (cached && Date.now() - cached.at < ARTIST_CACHE_TTL_MS) {
     if (signal?.aborted) throw abortError()
-    return cached
+    return cached.candidates
   }
   const negAt = artistNegativeCache.get(text)
   if (negAt && Date.now() - negAt < ARTIST_NEGATIVE_TTL_MS) return null
@@ -290,12 +323,11 @@ const findArtistWithDedup = async(text: string, signal?: AbortSignal): Promise<M
   }
   const task = (async() => {
     const artists = await findArtistCandidates(text)
-    const artist = artists[0] ?? null
-    if (artist) {
-      artistCache.set(text, artist)
-      if (artistCache.size > ARTIST_CACHE_MAX) {
-        const oldest = artistCache.keys().next().value
-        if (oldest) artistCache.delete(oldest)
+    if (artists.length) {
+      artistCandidatesCache.set(text, { candidates: artists, at: Date.now() })
+      if (artistCandidatesCache.size > ARTIST_CACHE_MAX) {
+        const oldest = artistCandidatesCache.keys().next().value
+        if (oldest) artistCandidatesCache.delete(oldest)
       }
       artistNegativeCache.delete(text)
     } else {
@@ -305,7 +337,7 @@ const findArtistWithDedup = async(text: string, signal?: AbortSignal): Promise<M
         if (oldest) artistNegativeCache.delete(oldest)
       }
     }
-    return artist
+    return artists.length ? artists : null
   })()
   pendingArtist.set(text, task)
   try {
@@ -319,14 +351,18 @@ const findArtistWithDedup = async(text: string, signal?: AbortSignal): Promise<M
 
 export const search = async(text: string, source: LX.OnlineSource, page: number): Promise<LX.Music.MusicInfo[]> => {
   if (!text) {
-    // 清空搜索框（v-show 隐藏，组件不卸载）：中止进行中的拉取，避免后台继续跑并入缓存
+    // 清空搜索框（v-show 隐藏，组件不卸载）：中止进行中的拉取并关闭可能打开的艺术家选择弹窗，
+    // 同时清空已选艺术家记忆——用户清空后重搜同词应重新弹选择器，而非沿用旧选择
+    closeArtistChoice()
     currentSearchController?.abort()
+    chosenArtistCache.clear()
     reset()
     lastResult = null
     lastResultKey = null
     return []
   }
-  // 新搜索替换前一个：中止旧拉取（其进行中请求停止，结果丢弃、不入缓存）
+  // 新搜索替换前一个：中止旧拉取、关闭仍打开的艺术家选择弹窗（其进行中请求停止，结果丢弃、不入缓存）
+  closeArtistChoice()
   currentSearchController?.abort()
   const searchController = new AbortController()
   currentSearchController = searchController
@@ -342,7 +378,36 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   let artist: MbzArtist | null = null
   let loadFailed = false
   try {
-    artist = await findArtistWithDedup(text, searchController.signal)
+    const candidates = await getArtistCandidates(text, searchController.signal)
+    if (candidates?.length) {
+      // 重名判定：名称或别名与搜索词「全等」的候选（rank>=2）多于 1 个 → 弹选择器让用户选择；
+      // 否则自动取排序首位（含 rank 全为 0 的模糊匹配，维持现自动行为避免骚扰）
+      const strong = candidates.filter(item => item.rank >= 2)
+      if (strong.length > 1) {
+        const rememberedId = chosenArtistCache.get(text)
+        if (rememberedId) {
+          artist = candidates.find(item => item.id == rememberedId) ?? strong[0]
+        } else {
+          artist = await openArtistChoice(strong)
+          if (searchController.signal.aborted) throw abortError()
+          if (!artist) {
+            // 用户取消选择（关闭弹窗）：恢复搜索未开始的「搜我所想~~」提示页——
+            // 清空搜索词，由 search('')/reset 现有重置链路复位（提示页仅 searchText 为空时显示）
+            searchState.isSearching = false
+            listInfo.noItemLabel = ''
+            setSearchText('')
+            return []
+          }
+          chosenArtistCache.set(text, artist.id)
+          if (chosenArtistCache.size > ARTIST_CACHE_MAX) {
+            const oldest = chosenArtistCache.keys().next().value
+            if (oldest) chosenArtistCache.delete(oldest)
+          }
+        }
+      } else {
+        artist = strong[0] ?? candidates[0]
+      }
+    }
   } catch (error) {
     if ((error as Error)?.name == 'AbortError') {
       // 搜索已中止（切换页面/取消勾选/新搜索/清空搜索框）：静默退出，不更新 UI、不写缓存。
@@ -362,7 +427,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   if (!artist) {
     listInfo.list = []
     listInfo.total = 0
-    listInfo.page = 0
+    listInfo.page = 1
     listInfo.maxPage = 0
     listInfo.key = null
     listInfo.noItemLabel = window.i18n.t(loadFailed ? 'search__mbz_load_failed' : 'search__mbz_no_artist')
@@ -395,7 +460,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   if (!result) {
     listInfo.list = []
     listInfo.total = 0
-    listInfo.page = page
+    listInfo.page = 1
     listInfo.maxPage = 0
     listInfo.key = null
     listInfo.noItemLabel = window.i18n.t('search__mbz_load_failed')
