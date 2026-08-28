@@ -104,22 +104,22 @@ export default ({
 
     switch (action.action) {
       case 'download':
-        handleShowDownloadModal(index)
+        handleShowDownloadModal(index).catch(() => {})
         break
       case 'play':
-        handlePlayMusic(index)
+        handlePlayMusic(index).catch(() => {})
         break
       case 'playLater':
-        handlePlayMusicLater(index)
+        handlePlayMusicLater(index).catch(() => {})
         break
       case 'search':
         handleSearch(index)
         break
       case 'addTo':
-        handleShowMusicAddModal(index)
+        handleShowMusicAddModal(index).catch(() => {})
         break
       case 'sourceDetail':
-        handleOpenMusicDetail(index)
+        handleOpenMusicDetail(index).catch(() => {})
         break
       case 'dislike':
         handleDislikeMusic(index)

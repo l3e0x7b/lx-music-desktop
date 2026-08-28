@@ -1,9 +1,9 @@
 <template>
-  <Modal :show="visible" :close-btn="false" :teleport="teleport" @close="handleCancel" @after-leave="afterLeave">
+  <Modal :show="visible" :close-btn="closeBtn" :teleport="teleport" @close="handleCancel" @after-leave="afterLeave">
     <main class="scroll" :class="[$style.main, { 'select': selection }]">{{ message }}</main>
-    <footer :class="$style.footer">
+    <footer v-if="showCancel || showConfirm" :class="$style.footer">
       <Btn v-if="showCancel" :class="$style.btn" @click="handleCancel">{{ cancelBtnText }}</Btn>
-      <Btn :class="$style.btn" @click="handleComfirm">{{ confirmBtnText }}</Btn>
+      <Btn v-if="showConfirm" :class="$style.btn" @click="handleComfirm">{{ confirmBtnText }}</Btn>
     </footer>
   </Modal>
 </template>
@@ -47,6 +47,8 @@ export default {
       confirmButtonText: '',
       teleport: '#root',
       selection: false,
+      closeBtn: false,
+      showConfirm: true,
     }
   },
   computed: {

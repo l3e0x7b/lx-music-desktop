@@ -79,6 +79,7 @@ import {
 import { sizeFormate } from '@common/utils/common'
 import { dialog } from '@renderer/plugins/Dialog'
 import { useI18n } from '@renderer/plugins/i18n'
+import { clearMusicBrainzCache } from '@renderer/utils/musicBrainz'
 import { appSetting, updateSetting } from '@renderer/store/setting'
 import { overwriteListFull } from '@renderer/store/list/listManage'
 import { dislikeRuleCount } from '@renderer/store/dislikeList'
@@ -105,10 +106,13 @@ export default {
     const cacheSize = ref('0 B')
     const isDisabledResourceCacheClear = ref(false)
     // const isDisabledListCacheClear = ref(false)
-    const refreshCacheSize = () => {
-      void getCacheSize().then(size => {
-        cacheSize.value = sizeFormate(size)
-      })
+    const refreshCacheSize = async() => {
+      // HTTP 磁盘缓存 + renderer origin 存储占用（IndexedDB≈mbz 作品集缓存 + 极小 localStorage）
+      const [httpSize, estimate] = await Promise.all([
+        getCacheSize(),
+        navigator.storage.estimate().catch(() => ({ usage: 0 })),
+      ])
+      cacheSize.value = sizeFormate(httpSize + (estimate?.usage ?? 0))
     }
     const clearResourceCache = async() => {
       if (!await dialog.confirm({
@@ -117,12 +121,14 @@ export default {
         confirmButtonText: t('setting__other_resource_cache_confirm'),
       })) return
       isDisabledResourceCacheClear.value = true
-      void clearCache().then(() => {
-        refreshCacheSize()
-        isDisabledResourceCacheClear.value = false
-      })
+      await Promise.all([
+        clearCache(), // Chromium HTTP 缓存
+        clearMusicBrainzCache(), // mbz 作品集内存 + IndexedDB 缓存
+      ])
+      void refreshCacheSize()
+      isDisabledResourceCacheClear.value = false
     }
-    refreshCacheSize()
+    void refreshCacheSize()
 
 
     const otherSourceCount = ref(0)

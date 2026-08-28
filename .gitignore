@@ -71,3 +71,7 @@ publish/assets
 publish/utils/githubToken.js
 
 src/**/*-internal.js
+
+# Development docs (not committed)
+PLAN.md
+REVIEW.md

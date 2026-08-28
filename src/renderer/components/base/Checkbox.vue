@@ -96,8 +96,6 @@ export default {
         } else if (value == null) checked = this.modelValue != ''
         else checked = this.modelValue == this.value
       }
-      // console.log(this.need, this.value, checked)
-      // this.checked = this.need ? checked && this.value : checked
       if (this.checked == checked) return
       this.checked = checked
     },
@@ -122,6 +120,7 @@ export default {
 
 .checkbox {
   display: inline-block;
+  -webkit-app-region: no-drag;
   // font-size: 56px;
 }
 .input {

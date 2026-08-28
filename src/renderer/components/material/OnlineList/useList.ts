@@ -52,6 +52,8 @@ const useKeyEvent = ({ handleSelectAllData, listRef }: {
 export default ({ props, listRef }: {
   props: {
     list: LX.Music.MusicInfoOnline[]
+    mbz?: boolean
+    mbzExpanded?: string[]
   }
   listRef: Ref<any>
 }) => {
@@ -61,12 +63,21 @@ export default ({ props, listRef }: {
     return Math.ceil((isFullscreen.value ? getFontSizeWithScreen() : appSetting['common.fontSize']) * 2.3)
   })
 
+  // mbz 批量选择范围（Shift 范围/Ctrl+A）：存在展开组时 = 所有已展开组内曲目行的并集
+  // （排除组行）；无展开组时无可批量选中项；组行恒不可批量选中；非 mbz 列表恒可选
+  const isMbzBatchSelectable = (item: LX.Music.MusicInfoOnline) => {
+    if (!props.mbz) return true
+    const expanded = props.mbzExpanded ?? []
+    if (expanded.length) return item.meta?.mbzGroup == null && expanded.includes(item.meta?.mbzGroupId ?? '')
+    return false
+  }
+
   const removeAllSelect = () => {
     selectedList.value = []
   }
   const handleSelectAllData = () => {
     removeAllSelect()
-    selectedList.value = [...props.list]
+    selectedList.value = props.list.filter(item => isMbzBatchSelectable(item))
   }
   const keyEvent = useKeyEvent({ handleSelectAllData, listRef })
 
@@ -83,11 +94,12 @@ export default ({ props, listRef }: {
             clickIndex = temp
             isNeedReverse = true
           }
-          selectedList.value = props.list.slice(_lastSelectIndex, clickIndex + 1)
+          selectedList.value = props.list.slice(_lastSelectIndex, clickIndex + 1).filter(item => isMbzBatchSelectable(item))
           if (isNeedReverse) selectedList.value.reverse()
         }
       } else {
-        selectedList.value.push(props.list[clickIndex])
+        const clickedItem = props.list[clickIndex]
+        if (isMbzBatchSelectable(clickedItem)) selectedList.value.push(clickedItem)
         lastSelectIndex = clickIndex
       }
     } else if (keyEvent.isModDown) {

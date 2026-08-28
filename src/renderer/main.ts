@@ -31,9 +31,11 @@ import { saveViewPrevState } from './utils/data'
 
 router.afterEach((to) => {
   if (to.path != '/songList/detail') {
+    const query = { ...to.query }
+    delete query.mbz
     saveViewPrevState({
       url: to.path,
-      query: { ...to.query },
+      query,
     })
   }
 })

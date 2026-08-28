@@ -23,8 +23,14 @@ export default ({ props }) => {
     })
   }
 
-  const handleOpenMusicDetail = index => {
-    const minfo = props.list[index]
+  const handleOpenMusicDetail = async index => {
+    let minfo = props.list[index]
+    // 占位项（如 MusicBrainz 候选）先解析为平台曲目，避免空 songmid/hash 打开无效详情页
+    if (props.resolvePlaceholder) {
+      const resolved = await props.resolvePlaceholder(minfo)
+      if (!resolved) return
+      minfo = resolved
+    }
     const url = musicSdk[minfo.source]?.getMusicDetailPageUrl?.(toOldMusicInfo(minfo))
     if (!url) return
     openUrl(url)

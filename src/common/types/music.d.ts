@@ -23,6 +23,37 @@ declare namespace LX {
       albumName: string // 歌曲专辑名称
       picUrl?: string | null // 歌曲图片链接
       toggleMusicInfo?: MusicInfoOnline | null
+      // —— 以下为 mbz 作品集搜索占位字段（组行/曲目行，非平台元数据）——
+      mbzType?: string // 作品集主类型（Album/EP/Single/...）
+      mbzTrackMbid?: string // 曲目 recording MBID
+      mbzArtistMbid?: string // 艺术家 MBID
+      mbzReleaseMbid?: string // 版本 release MBID（曲目行 meta 为选中版本字段）
+      mbzReleaseCatalog?: string // 版本目录号（曲目行悬浮展示）
+      mbzReleaseBarcode?: string // 版本条码（曲目行悬浮展示）
+      mbzMediaFormat?: string // 曲目来源媒体格式（CD/DVD 等，曲目行标签展示）
+      mbzGroupId?: string // 作品集 release group MBID
+      mbzGroupIndex?: number // 作品集序号（从 1 计数，组行序号列展示，与曲目序号区分）
+      mbzReleaseId?: string // 组行选中版本 release MBID（切换下拉时写入，缺省官网序第一行）
+      mbzTrackIndex?: number // 曲目组内序号（从 1 计数，mbz 展开曲目行展示用）
+      mbzGroup?: { // 组行占位：内嵌版本下拉数据
+        id: string
+        title: string
+        /** 组级艺术家名列表（单曲合并后还原组行原貌用） */
+        artists: string[]
+        primaryType: string
+        date: string | null
+        releases: Array<{
+          id: string
+          date: string | null
+          country: string | null
+          format: string | null
+          trackCount: string | null // 各媒体曲目数原始展示（如 "10+7"）
+          label: string | null
+          catalog: string | null
+          barcode: string | null
+          quality: string | null // 音质标记（"high" 高音质，下拉选项 ● 前缀）
+        }>
+      }
     }
 
     interface MusicInfoMeta_online extends MusicInfoMetaBase {

@@ -25,7 +25,6 @@ export default () => {
   // const updateMusicInfo = useCommit('list', 'updateMusicInfo')
 
   const startBuffering = () => {
-    console.log('start t')
     if (mediaBuffer.timeout) return
     mediaBuffer.timeout = setTimeout(() => {
       mediaBuffer.timeout = null
@@ -45,12 +44,9 @@ export default () => {
       }
       startBuffering()
       setCurrentTime(skipTime)
-      console.log(mediaBuffer.playTime)
-      console.log(currentTime)
     }, 3000)
   }
   const clearBufferTimeout = () => {
-    console.log('clear t')
     if (!mediaBuffer.timeout) return
     clearTimeout(mediaBuffer.timeout)
     mediaBuffer.timeout = null
@@ -60,7 +56,6 @@ export default () => {
   const setProgress = (time: number, maxTime?: number) => {
     if (!musicInfo.id) return
     if (maxTime != null) setMaxplayTime(maxTime)
-    console.log('setProgress', time, maxTime)
     if (time > 0) restorePlayTime = time
     if (mediaBuffer.playTime) {
       clearBufferTimeout()
@@ -84,7 +79,6 @@ export default () => {
 
   const handleError = () => {
     restorePlayTime ||= getCurrentTime() // 记录出错的播放时间
-    console.log('handleError')
   }
 
   const handleLoadeddata = () => {
@@ -106,7 +100,6 @@ export default () => {
   }
 
   const handlePlaying = () => {
-    console.log('handlePlaying', mediaBuffer.playTime, restorePlayTime)
     clearBufferTimeout()
     if (mediaBuffer.playTime) {
       let playTime = mediaBuffer.playTime

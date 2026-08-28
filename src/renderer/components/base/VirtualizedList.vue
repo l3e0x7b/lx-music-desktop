@@ -134,18 +134,15 @@ export default {
     let startIndex = -1
     let endIndex = -1
     let scrollTop = -1
-    let cachedList = []
     let cancelScroll = null
     let isAutoScrolling = false
     let scrollToValue = 0
 
     const createList = (startIndex, endIndex) => {
-      const cache = cachedList.slice(startIndex, endIndex)
-      const list = props.list.slice(startIndex, endIndex).map((item, i) => {
-        if (cache[i]) return cache[i]
-        const top = (startIndex + i) * props.itemHeight
+      return props.list.slice(startIndex, endIndex).map((item, i) => {
         const index = startIndex + i
-        return cachedList[index] = {
+        const top = index * props.itemHeight
+        return {
           item,
           top,
           style: { position: 'absolute', left: 0, right: 0, top: top + 'px', height: props.itemHeight + 'px' },
@@ -153,10 +150,10 @@ export default {
           key: item[props.keyName],
         }
       })
-      return list
     }
 
-    const updateView = (currentScrollTop = dom_scrollContainer.value.scrollTop) => {
+    const updateView = (currentScrollTop = dom_scrollContainer.value?.scrollTop) => {
+      if (!dom_scrollContainer.value) return
       // const currentScrollTop = this.$refs.dom_scrollContainer.scrollTop
       const itemHeight = props.itemHeight
       const currentStartIndex = Math.floor(currentScrollTop / itemHeight)
@@ -267,10 +264,9 @@ export default {
     })
 
     const handleReset = list => {
-      cachedList = Array(list.length)
       startIndex = -1
       endIndex = -1
-      if (cachedList.length) {
+      if (list.length) {
         void nextTick(() => {
           requestAnimationFrame(() => {
             updateView()
@@ -292,7 +288,6 @@ export default {
         capture: false,
         passive: true,
       })
-      cachedList = Array(props.list.length)
       startIndex = -1
       endIndex = -1
 
@@ -307,7 +302,7 @@ export default {
       window.addEventListener('resize', handleResize)
     })
     onBeforeUnmount(() => {
-      dom_scrollContainer.value.removeEventListener('scroll', onScroll)
+      dom_scrollContainer.value?.removeEventListener('scroll', onScroll)
       window.removeEventListener('resize', handleResize)
       if (cancelScroll) cancelScroll()
     })

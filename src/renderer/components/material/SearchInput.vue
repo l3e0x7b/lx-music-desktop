@@ -203,7 +203,7 @@ export default {
 
 .container {
   position: relative;
-  width: 35%;
+  width: var(--lx-search-input-width, 35%);
   height: @height-toolbar * 0.52;
   -webkit-app-region: no-drag;
 }
