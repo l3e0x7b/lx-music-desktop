@@ -15,7 +15,7 @@ LX Music（洛雪音乐助手）桌面版：一个基于 **Electron 40 + Vue 3**
 本仓库为上游 `lyswhut/lx-music-desktop` 的 fork（本仓库名 `l3e0x7b/lx-music-desktop`），基于原生 **v2.12.2** 改造（当前特性：mbz 作品集搜索）。以下约定**仅适用于本仓库**，与上游发布策略无关：
 
 - **版本号固定为 2.12.2**，不随上游升级；
-- **交付产物命名带 `mbz` 标识**，如 win 绿色版 `lx-music-desktop-v2.12.2-mbz-win_x64-green.7z`（见「打包」）；
+- **交付产物**：当前分支**仅构建 win 绿色版** `lx-music-desktop-v2.12.2-mbz-win_x64-green.7z`，其余平台/安装包/win7 等目标暂不构建（见「打包」）；
 - git `origin` 与 `build-config/build-pack.js` 的 `publish` 目标均指向自有仓库（`l3e0x7b/lx-music-desktop`）；
 - 与上游同步（rebase/merge）或向上游提交时，注意排除上述本地化改动。
 
@@ -127,7 +127,7 @@ PLAN.md             本 fork 的 mbz 作品集搜索功能开发计划（对应 
 
 > 注意：`postinstall` 为 `electron-builder install-app-deps`，会重新编译原生依赖；`build-config/lib/` 中为各平台/ABI 的预编译 `.node`（当前 Electron ABI v143，Electron 22 用 v110），由 `build-before-pack.js` 拷贝/替换，**不要改动 net 或 lib 中的二进制**。若需重新构建原生模块，参考 `build-config/lib-update.js`（解包 tar.gz 到规范命名）。
 
-- **打包**：`build-config/build-pack.js`（electron-builder）。目标矩阵：win（nsis/7z/portable/win7_*）、linux（deb/AppImage/pacman/rpm）、mac（dmg）。平台差异：win 用 NSIS（语言 2052，`lxmusic` 协议），linux 自定义 `.desktop`（`x-scheme-handler/lxmusic`），mac `afterPack` 写 InfoPlist.strings 本地化（electron-builder 问题 #4630 workaround）。产物命名由 `artifactName` 决定；本仓库的版本固定与 `mbz` 命名标识约定见「仓库定位与分支约定」。
+- **打包**：`build-config/build-pack.js`（electron-builder）。脚本保留上游完整目标矩阵：win（nsis/7z/portable/win7_*）、linux（deb/AppImage/pacman/rpm）、mac（dmg）；但**本分支当前仅构建 win 绿色版**，产物 `lx-music-desktop-v2.12.2-mbz-win_x64-green.7z`，其余目标暂不构建。平台差异：win 用 NSIS（语言 2052，`lxmusic` 协议），linux 自定义 `.desktop`（`x-scheme-handler/lxmusic`），mac `afterPack` 写 InfoPlist.strings 本地化（electron-builder 问题 #4630 workaround）。产物命名由 `artifactName` 决定；本仓库的版本固定与 `mbz` 命名标识约定见「仓库定位与分支约定」。
 - **发布**：GitHub Actions。
   - `release.yml`（master 触发）→ 4 任务（win / win7 / mac / linux）`publish:*` 上传 GitHub Releases。
   - `beta-pack.yml`（beta 触发）→ `pack:*` + upload artifact。
