@@ -97,7 +97,9 @@ const handlePlayList = (index: number) => {
 }
 
 // 切换页面/取消勾选（组件卸载）时中止进行中的 mbz 拉取：停止请求、结果不入缓存
+let searchTimer: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
   abortSearch()
 })
 
@@ -112,7 +114,7 @@ watch(() => listInfo.list, rebuildList, { deep: true })
 
 // 源/页/关键词任一变化触发搜索；合并为单一 watch 避免 text 与 source/page 同时变化时的重复 search
 watch([() => props.sourceId, () => props.page, searchText], ([sourceId, page, text]) => {
-  setTimeout(() => {
+  searchTimer = setTimeout(() => {
     search(text || '', sourceId, page || 1)
   })
 }, { immediate: true })

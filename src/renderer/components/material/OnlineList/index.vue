@@ -25,6 +25,8 @@
       </div>
       <div :class="$style.content">
         <div v-show="!noItem" ref="dom_listContent" :class="$style.content">
+          <!-- 注意：本文件两个分支（actionButtonsVisible 为真/假）的组行+曲目行模板相互重复，仅列宽百分比不同；
+               修改任一行模板时必须同步另一分支，否则「列表操作按钮」开关切换后会出现列宽/内容不一致。 -->
           <base-virtualized-list v-if="actionButtonsVisible" ref="listRef" :list="list" key-name="id" :item-height="listItemHeight" container-class="scroll" content-class="list" @contextmenu.capture="handleListRightClick">
             <template #default="{ item, index }">
               <div

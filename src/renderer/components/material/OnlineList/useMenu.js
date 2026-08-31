@@ -122,7 +122,7 @@ export default ({
         handleOpenMusicDetail(index).catch(() => {})
         break
       case 'dislike':
-        handleDislikeMusic(index)
+        handleDislikeMusic(index).catch(() => {})
         break
     }
   }

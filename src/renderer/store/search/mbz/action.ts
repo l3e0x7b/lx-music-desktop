@@ -480,12 +480,12 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   listInfo.key = key
   listInfo.noItemLabel = list.length
     ? ''
-    : window.i18n.t(result.failedPages > 0 ? 'search__mbz_load_failed' : 'search__mbz_no_result')
+    : window.i18n.t(result.failedPages > 0 || result.failedOrphans > 0 ? 'search__mbz_load_failed' : 'search__mbz_no_result')
   searchState.isSearching = false
   if (list.length) void addHistoryWord(text)
   // 部分失败：有部分数据时照常展示并标记叹号（等待后台补拉完成自动刷新）；
   // 无任何数据时 noItemLabel 已给出失败文案，不再叠加叹号，避免「无记录」与「部分失败」语义矛盾
-  if (result.failedPages > 0 && list.length > 0) {
+  if ((result.failedPages > 0 || result.failedOrphans > 0) && list.length > 0) {
     searchState.partialFailed = true
     void result.refilled.then(async() => {
       // 中止后（组件卸载/取消勾选/新搜索接手）不再刷新 store：补拉独立于 signal 运行，
@@ -496,7 +496,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
       const fresh = await getArtistDiscography(artist.id, undefined, searchController.signal).catch(() => null)
       if (searchController.signal.aborted) return
       if (currentSearchController !== searchController || !fresh || searchState.searchKey != key) return
-      searchState.partialFailed = fresh.failedPages > 0
+      searchState.partialFailed = fresh.failedPages > 0 || fresh.failedOrphans > 0
       lastResult = fresh
       const freshList = fresh.groups.map(group => toMbzGroupMusicInfo(group, source))
       listInfo.list = freshList

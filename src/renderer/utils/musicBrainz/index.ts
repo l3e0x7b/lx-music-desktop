@@ -27,8 +27,6 @@ const ORPHAN_TIMEOUT = 15000
 /** 网络类错误重试次数（退避 1s/2s） */
 const NETWORK_RETRY_NUM = 2
 const maxRetryNum = 3
-/** 孤儿组 Official 状态轻量查询：单次最多检查数（超出部分放弃逐一确认） */
-const MAX_ORPHAN_CHECK = 20
 /** 孤儿组查询并发池大小（与限流器并发上限一致，请求真实并行但受全局限流窗口约束） */
 const ORPHAN_CHECK_CONCURRENCY = 2
 /** 孤儿组检查失败止损：连续失败 ≥ 该值（通路持续差）时放弃剩余检查，避免拖垮整次搜索 */
@@ -243,9 +241,11 @@ export interface MbzRangeResult {
   groups: MbzGroupFull[]
   /** 有效作品集（release-group）总数 */
   groupTotal: number
-  /** 本次调用内加载失败的页数（>0 表示部分数据缺失） */
+  /** 本次调用内加载失败的页数（>0 表示部分数据缺失；仅统计 release/group 两条 browse 链的页级失败，不含孤儿组失败） */
   failedPages: number
-  /** 后台补拉完成信号：failedPages>0 时由 loadDiscography 自动触发的 refill 完成 promise（无补全时立即 resolved） */
+  /** 孤儿组（release browse 未覆盖、另行检查 Official 的组）检查失败的组数（请求失败/止损放弃；>0 表示部分孤儿组缺失） */
+  failedOrphans: number
+  /** 后台补拉完成信号：failedPages>0 或 failedOrphans>0 时由 loadDiscography 自动触发的 refill 完成 promise（无补全时立即 resolved） */
   refilled: Promise<void>
 }
 
@@ -257,6 +257,7 @@ interface DiscographyCache {
   raw: { releases: MbzReleaseRaw[], groups: MbzGroupRaw[], orphanOfficial: string[] }
   aggregated: AggregatedDiscography
   failedPages: number
+  failedOrphans: number
 }
 
 const artistCache = new Map<string, DiscographyCache>()
@@ -304,7 +305,7 @@ export const findArtistCandidates = async(artistName: string): Promise<MbzArtist
         type: item.type ?? '',
         gender: gender ? gender.charAt(0).toUpperCase() + gender.slice(1) : '',
         area: item.area?.name ?? '',
-        begin: item['life-span']?.begin ?? item.begin?.year ?? '',
+        begin: item['life-span']?.begin ?? '',
         rank,
       }
       return { artist, score: item.score ?? 0 }
@@ -604,12 +605,15 @@ const checkGroupOfficial = async(groupId: string): Promise<MbzReleaseRaw[] | nul
 /**
  * 拉取该艺术家全部 releases 与 release-group 元数据（页级 browse + 页级容错 + 全局限流）
  * releases（曲目内联）与 release-group 元数据两条分页链并行推进（共享滑动窗口限流器）
- * 孤儿组（组归属艺人但无 release 落入 release browse）另行轻量查询 Official 状态：
- * 并发池化（真实并行，受全局限流器窗口约束）+ 单次最多检查 MAX_ORPHAN_CHECK 个，
- * 检查进度并入 onProgress 总数，避免进度条 100% 后仍长时间无反馈
+ * 孤儿组（组归属艺人但无 release 落入 release browse，如版本署名 Various Artists 的合辑）
+ * 全量轻量查询 Official 状态（与官网 Discography 口径一致，不因限流降档或数量而跳过）：
+ * 并发池化（真实并行，受全局限流器窗口约束）；检查失败/止损跳过的组计入 failedOrphans，
+ * 由上层「部分失败叹号 + 后台补拉」自愈，避免静默丢失
+ * 防御门槛：release 链整体失败（releases 为空）时，全部组都会误判为孤儿，逐组重查询会放大请求风暴——
+ * 该情形直接跳过逐组检查、将全部孤儿计入 failedOrphans，交由后台补拉在通路恢复后自愈
  * @param signal 中断信号：中止时停止发起后续请求并抛 AbortError（上层丢弃结果、不入缓存）
  */
-const fetchDiscography = async(artistId: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<{ releases: MbzReleaseRaw[], groups: MbzGroupRaw[], orphanOfficial: string[], failedPages: number }> => {
+const fetchDiscography = async(artistId: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<{ releases: MbzReleaseRaw[], groups: MbzGroupRaw[], orphanOfficial: string[], failedPages: number, failedOrphans: number }> => {
   // 软重置：降级后超过 30s 无新降级，恢复默认档（避免前次搜索的繁忙状态拖累本次搜索）
   if (rateState.burst == 1 && rateState.lastDowngradeAt && Date.now() - rateState.lastDowngradeAt > 30000) {
     rateState.burst = MAX_CONCURRENCY
@@ -665,62 +669,75 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
     ),
   ])
   const orphanOfficial: string[] = []
+  /** 孤儿检查失败（请求失败/止损放弃）的组数：单独计数，由「叹号 + 后台补拉」自愈，避免静默丢失 */
+  let failedOrphans = 0
   const orphans = groups.filter(group => !releaseGroupIds.has(group.id)).map(group => group.id)
-  // 限流保护已激活（429 累计降档）时跳过孤儿组检查：该状态下请求大概率继续超时/429，
-  // 20 个轻量检查将拖累整次搜索；孤儿组救回率本就低（周杰伦 20 组救回 1 组），牺牲可接受
-  const checkList = rateState.burst == 1 ? [] : orphans.slice(0, MAX_ORPHAN_CHECK)
-  if (checkList.length) {
-    // 孤儿组检查并入进度：以「已确认组数 / 总作品集数」推进
-    let checked = 0
-    let index = 0
-    let stopped = false
-    let failStreak = 0
-    const worker = async() => {
-      while (index < checkList.length) {
-        if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
-        // 失败止损：连续失败过多说明通路持续差，剩余检查大概率继续失败，放弃避免拖垮整次搜索
-        if (failStreak >= ORPHAN_FAIL_STOP) {
-          stopped = true
-          break
-        }
-        const groupId = checkList[index++]
-        const result = await checkGroupOfficial(groupId)
-        // eslint-disable-next-line require-atomic-updates
-        if (result === null) failStreak++
-        else {
-          // eslint-disable-next-line require-atomic-updates
-          failStreak = 0
-          if (result.length) {
-            orphanOfficial.push(groupId)
-            // 回填孤儿组 releases（含 recordings）：与 release browse 结果同池，
-            // 孤儿组因此获得版本下拉/展开能力（该组 release 的 artist-credit 非本艺人，不会污染其他组）。
-            // 注意：browse by release-group 响应不含 release-group 引用，需显式补上（聚合按此分组）
-            for (const release of result) {
-              if (seenReleaseIds.has(release.id)) continue
-              seenReleaseIds.add(release.id)
-              if (!release['release-group']) release['release-group'] = { id: groupId }
-              releases.push(release)
+  if (orphans.length) {
+    if (!releases.length) {
+      // 防御门槛：release 链整体失败（releases 空）时，全部组都被误判为孤儿，
+      // 逐组重查询会把慢网络下的一次失败放大成「组数量级」请求风暴。
+      // 此时全部孤儿直接计入 failedOrphans，交由后台补拉在通路恢复后重拉自愈。
+      failedOrphans = orphans.length
+      onProgress?.(groups.length, groups.length)
+    } else {
+      // 孤儿组检查并入进度：以「已确认组数 / 总作品集数」推进（done 不含 release 链未覆盖的孤儿，
+      // 随逐个检查增加；进度钳制到 total 以内，避免倒挂/超 100%）
+      let checked = 0
+      let index = 0
+      let stopped = false
+      let failStreak = 0
+      const worker = async() => {
+        while (index < orphans.length && !stopped) {
+          if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
+          // 失败止损：连续失败过多说明通路持续差，剩余检查大概率继续失败，放弃避免拖垮整次搜索；
+          // 放弃的组计入 failedOrphans，待后台补拉在通路恢复后补齐
+          if (failStreak >= ORPHAN_FAIL_STOP) {
+            stopped = true
+            break
+          }
+          const groupId = orphans[index++]
+          const result = await checkGroupOfficial(groupId)
+          if (result === null) {
+            // eslint-disable-next-line require-atomic-updates
+            failStreak++
+            // eslint-disable-next-line require-atomic-updates
+            failedOrphans++
+          } else {
+            // eslint-disable-next-line require-atomic-updates
+            failStreak = 0
+            if (result.length) {
+              orphanOfficial.push(groupId)
+              // 回填孤儿组 releases（含 recordings）：与 release browse 结果同池，
+              // 孤儿组因此获得版本下拉/展开能力（该组 release 的 artist-credit 非本艺人，不会污染其他组）。
+              // 注意：browse by release-group 响应不含 release-group 引用，需显式补上（聚合按此分组）
+              for (const release of result) {
+                if (seenReleaseIds.has(release.id)) continue
+                seenReleaseIds.add(release.id)
+                if (!release['release-group']) release['release-group'] = { id: groupId }
+                releases.push(release)
+              }
             }
           }
+          checked++
+          onProgress?.(Math.min(groups.length - orphans.length + checked, groups.length), groups.length)
         }
-        checked++
-        onProgress?.(releaseGroupIds.size + checked, groups.length)
       }
-    }
-    // worker 仅可能以 AbortError 拒绝（checkGroupOfficial 已吞掉其余错误）：
-    // Promise.all 提前拒绝后其余 worker 的 AbortError 将无人消费，静默避免 unhandled rejection，
-    // 中止语义由 Promise.all 之后的 signal 复查保证
-    await Promise.all(Array.from({ length: Math.min(ORPHAN_CHECK_CONCURRENCY, checkList.length) }, async() => worker().catch(error => {
-      if ((error as Error)?.name != 'AbortError') console.log(error)
-    })))
-    if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
-    if (stopped) {
-      // 止损放弃的剩余组按已完成计入进度，避免进度条停在 100% 前
-      onProgress?.(releaseGroupIds.size + checkList.length, groups.length)
+      // worker 仅可能以 AbortError 拒绝（checkGroupOfficial 已吞掉其余错误）：
+      // Promise.all 提前拒绝后其余 worker 的 AbortError 将无人消费，静默避免 unhandled rejection，
+      // 中止语义由 Promise.all 之后的 signal 复查保证
+      await Promise.all(Array.from({ length: Math.min(ORPHAN_CHECK_CONCURRENCY, orphans.length) }, async() => worker().catch(error => {
+        if ((error as Error)?.name != 'AbortError') console.log(error)
+      })))
+      if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
+      if (stopped) {
+        // 止损放弃的剩余组计入失败（等待后台补拉），进度补满到 100% 避免卡在完成前
+        failedOrphans += orphans.length - checked
+        onProgress?.(groups.length, groups.length)
+      }
     }
   }
   const failedPages = releaseResult.failedPages + groupResult.failedPages
-  return { releases, groups, orphanOfficial, failedPages }
+  return { releases, groups, orphanOfficial, failedPages, failedOrphans }
 }
 
 /**
@@ -796,6 +813,7 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
           },
           aggregated: aggregateDiscography(persisted.releases, persisted.groups ?? [], new Set(persisted.orphanOfficial ?? [])),
           failedPages: persisted.failedPages ?? 0,
+          failedOrphans: persisted.failedOrphans ?? 0,
         }
         artistCacheSet(artistId, cache)
       }
@@ -811,9 +829,11 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
         raw: { releases: payload.releases, groups: payload.groups, orphanOfficial: payload.orphanOfficial },
         aggregated,
         failedPages: payload.failedPages,
+        failedOrphans: payload.failedOrphans,
       }
-      // 部分失败（failedPages 少）也入缓存：网络差时避免「几分钟白跑且下次重来」，
-      // 命中不完整缓存后由后台静默补拉（refillDiscography）补全
+      // 部分失败（失败页数少）也入缓存：网络差时避免「几分钟白跑且下次重来」，
+      // 命中不完整缓存后由后台静默补拉（refillDiscography）补全。
+      // 孤儿组失败单独计数，不阻断缓存准入（主数据页完整即可缓存），但会持久化并触发后台补拉。
       if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
         artistCacheSet(artistId, cache)
         // 有效数据落盘缓存（空结果不缓存，避免阻隔下次重试）
@@ -825,13 +845,14 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
             orphanOfficial: payload.orphanOfficial,
             fetchedAt: Date.now(),
             failedPages: payload.failedPages,
+            failedOrphans: payload.failedOrphans,
           } satisfies DiscographyPersist)
         }
       }
     }
-    // 命中不完整数据：后台静默补拉（不阻塞 UI，完成后覆盖内存与落盘缓存）；
+    // 命中不完整数据（页失败或孤儿失败）：后台静默补拉（不阻塞 UI，完成后覆盖内存与落盘缓存）；
     // 冷却期内的重复加载不再触发，防止补拉持续失败时每次搜索都全量重拉挤占限流窗口
-    if (cache.failedPages > 0 && Date.now() - (lastRefillAt.get(artistId) ?? 0) >= REFILL_COOLDOWN_MS) {
+    if ((cache.failedPages > 0 || cache.failedOrphans > 0) && Date.now() - (lastRefillAt.get(artistId) ?? 0) >= REFILL_COOLDOWN_MS) {
       void refillDiscography(artistId)
     }
     return cache
@@ -859,8 +880,10 @@ const refillDiscography = async(artistId: string): Promise<void> => {
         raw: { releases: payload.releases, groups: payload.groups, orphanOfficial: payload.orphanOfficial },
         aggregated: aggregateDiscography(payload.releases, payload.groups, new Set(payload.orphanOfficial)),
         failedPages: payload.failedPages,
+        failedOrphans: payload.failedOrphans,
       }
-      // 与主趟同阈值：补拉结果过差（失败页超限）时不覆盖，保留原缓存等下次再补
+      // 与主趟同阈值：补拉结果过差（失败页超限）时不覆盖，保留原缓存等下次再补；
+      // 孤儿失败单独计数，不阻断覆盖（主数据页完整即可），随缓存持久化并由下次加载继续触发补拉
       if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
         artistCacheSet(artistId, cache)
         if (payload.releases.length) {
@@ -871,6 +894,7 @@ const refillDiscography = async(artistId: string): Promise<void> => {
             orphanOfficial: payload.orphanOfficial,
             fetchedAt: Date.now(),
             failedPages: payload.failedPages,
+            failedOrphans: payload.failedOrphans,
           } satisfies DiscographyPersist)
         }
       }
@@ -902,6 +926,7 @@ export const getArtistDiscography = async(artistId: string, onProgress?: (done: 
     groups,
     groupTotal: groups.length,
     failedPages: cache.failedPages,
+    failedOrphans: cache.failedOrphans,
     refilled: pendingRefill.get(artistId) ?? Promise.resolve(),
   }
 }
