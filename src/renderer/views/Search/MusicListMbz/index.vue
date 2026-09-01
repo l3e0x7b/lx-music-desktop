@@ -126,7 +126,6 @@ const progressWidth = computed(() => {
 const progressText = computed(() => {
   return window.i18n.t('search__mbz_loading', {
     done: searchState.progress.done,
-    total: searchState.progress.total,
   })
 })
 </script>

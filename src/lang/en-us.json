@@ -292,7 +292,7 @@
   "search__mbz_checkbox": "Search Complete Release Groups",
   "search__mbz_input_placeholder": "Search artist, e.g. Jay Chou",
   "search__mbz_load_failed": "Failed to fetch release groups from MusicBrainz",
-  "search__mbz_loading": "Fetching release groups from MusicBrainz: {done}/{total}",
+  "search__mbz_loading": "Fetching release groups from MusicBrainz: {done}",
   "search__mbz_no_artist": "Artist not found, please check your input",
   "search__mbz_no_result": "No release group records found for this artist",
   "search__mbz_partial_failed": "Some release groups failed to load; waiting for retry, or try searching again",

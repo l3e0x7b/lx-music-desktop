@@ -31,6 +31,9 @@ const maxRetryNum = 3
 const ORPHAN_CHECK_CONCURRENCY = 2
 /** 孤儿组检查失败止损：连续失败 ≥ 该值（通路持续差）时放弃剩余检查，避免拖垮整次搜索 */
 const ORPHAN_FAIL_STOP = 5
+/** 孤儿组检查总数预算：检查数超该值即停止，剩余组计入 failedOrphans 走后台补拉自愈。
+ * 与 ORPHAN_FAIL_STOP（连续失败止损）互补：封堵「孤儿极多（合辑艺人）且网络差但非连续失败」时的长尾 */
+const ORPHAN_CHECK_MAX_TOTAL = 50
 /** 部分失败仍入缓存的最大失败页数（≤ 该值视为「不完整但可用」，命中后后台静默补拉；
  * 周杰伦 release 链 7 页，失败 5 页仍有 2 页可用数据，先展示 + 后台补全优于整次白等） */
 const PARTIAL_CACHE_MAX_FAILED_PAGES = 5
@@ -630,13 +633,23 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
   const seenReleaseIds = new Set<string>()
   const seenGroupIds = new Set<string>()
   const releaseGroupIds = new Set<string>()
-  // done（release 链已发现组数）与 total（group 链已收组数）来自两条并行分页链，
+  /** release 链中已确认含 Official 发行的组（与 aggregateDiscography 的 official 判定口径一致，不含孤儿组） */
+  const officialGroupIds = new Set<string>()
+  /** 已确认官方组数 = officialGroupIds ∩ group browse 已收组（排除反向孤儿：release 链引用了但组链未返回的组，最终结果同样不含它们） */
+  const confirmedOfficialCount = () => {
+    let count = 0
+    for (const id of officialGroupIds) {
+      if (seenGroupIds.has(id)) count++
+    }
+    return count
+  }
+  // done（已确认官方组数）与 total（group 链已收组数）来自两条并行分页链，
   // 中途 done 可能暂时超过 total：收敛到 total 以内，避免进度条瞬时倒挂/超 100%
   const reportGroupProgress = () => {
     // 组链首页返回前 groups 为空：不回调，避免进度条瞬时显示 0/1 后再被真实作品集数接管
     if (!groups.length) return
     const total = groups.length
-    onProgress?.(Math.min(releaseGroupIds.size, total), total)
+    onProgress?.(Math.min(confirmedOfficialCount(), total), total)
   }
   const [releaseResult, groupResult] = await Promise.all([
     browseAllPages(
@@ -647,7 +660,10 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
           seenReleaseIds.add(item.id)
           releases.push(item)
           const groupId = item['release-group']?.id
-          if (groupId) releaseGroupIds.add(groupId)
+          if (groupId) {
+            releaseGroupIds.add(groupId)
+            if (item.status == 'Official') officialGroupIds.add(groupId)
+          }
         }
         reportGroupProgress()
       },
@@ -678,7 +694,7 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
       // 逐组重查询会把慢网络下的一次失败放大成「组数量级」请求风暴。
       // 此时全部孤儿直接计入 failedOrphans，交由后台补拉在通路恢复后重拉自愈。
       failedOrphans = orphans.length
-      onProgress?.(groups.length, groups.length)
+      onProgress?.(confirmedOfficialCount(), groups.length)
     } else {
       // 孤儿组检查并入进度：以「已确认组数 / 总作品集数」推进（done 不含 release 链未覆盖的孤儿，
       // 随逐个检查增加；进度钳制到 total 以内，避免倒挂/超 100%）
@@ -687,7 +703,7 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
       let stopped = false
       let failStreak = 0
       const worker = async() => {
-        while (index < orphans.length && !stopped) {
+        while (index < orphans.length && !stopped && checked < ORPHAN_CHECK_MAX_TOTAL) {
           if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
           // 失败止损：连续失败过多说明通路持续差，剩余检查大概率继续失败，放弃避免拖垮整次搜索；
           // 放弃的组计入 failedOrphans，待后台补拉在通路恢复后补齐
@@ -719,7 +735,7 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
             }
           }
           checked++
-          onProgress?.(Math.min(groups.length - orphans.length + checked, groups.length), groups.length)
+          onProgress?.(Math.min(confirmedOfficialCount() + orphanOfficial.length, groups.length), groups.length)
         }
       }
       // worker 仅可能以 AbortError 拒绝（checkGroupOfficial 已吞掉其余错误）：
@@ -729,10 +745,11 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
         if ((error as Error)?.name != 'AbortError') console.log(error)
       })))
       if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
-      if (stopped) {
-        // 止损放弃的剩余组计入失败（等待后台补拉），进度补满到 100% 避免卡在完成前
+      if (checked < orphans.length) {
+        // 提前退出（连续失败止损或超总数预算）：剩余未检查的组计入失败（等待后台补拉），
+        // 进度按已确认官方数收敛（最终由 loadDiscography 修正为实际聚合结果）
         failedOrphans += orphans.length - checked
-        onProgress?.(groups.length, groups.length)
+        onProgress?.(Math.min(confirmedOfficialCount() + orphanOfficial.length, groups.length), groups.length)
       }
     }
   }
@@ -818,8 +835,8 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
         artistCacheSet(artistId, cache)
       }
     }
-    // 缓存命中（内存/落盘）：进度直接置满，避免命中缓存的快速加载期间短暂显示 0/0
-    if (cache) onProgress?.(1, 1)
+    // 缓存命中（内存/落盘）：进度直接置为实际聚合后的官方作品集数，避免命中缓存的快速加载期间短暂显示 0/1
+    if (cache) onProgress?.(cache.aggregated.groups.length, cache.aggregated.groups.length)
     if (!cache) {
       const payload = await fetchDiscography(artistId, onProgress, signal)
       const aggregated = aggregateDiscography(payload.releases, payload.groups, new Set(payload.orphanOfficial))

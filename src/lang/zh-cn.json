@@ -292,7 +292,7 @@
   "search__mbz_checkbox": "搜索完整作品集",
   "search__mbz_input_placeholder": "搜索艺术家名，如：周杰伦",
   "search__mbz_load_failed": "无法从 MusicBrainz 获取作品集",
-  "search__mbz_loading": "正在从 MusicBrainz 获取作品集：{done}/{total}",
+  "search__mbz_loading": "正在从 MusicBrainz 获取作品集：{done}",
   "search__mbz_no_artist": "未找到该艺术家，请检查输入是否正确",
   "search__mbz_no_result": "该艺术家暂无作品集记录",
   "search__mbz_partial_failed": "部分作品集获取失败，等待重试，或尝试手动重新搜索",

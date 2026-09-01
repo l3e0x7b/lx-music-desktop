@@ -94,6 +94,8 @@ export declare interface DiscographyPersist {
 const DB_NAME = 'lx-music-desktop'
 const STORE_NAME = 'musicbrainz-discography'
 const DB_VERSION = 1
+/** 落盘缓存容量上限（近似字节数，用 JSON 序列化长度估算）：超限按 fetchedAt 最旧优先淘汰 */
+const DISK_CACHE_MAX_BYTES = 50 * 1024 * 1024
 
 let dbPromise: Promise<IDBDatabase | null> | null = null
 
@@ -163,8 +165,45 @@ export const cacheSave = async(payload: DiscographyPersist): Promise<void> => {
     const db = await openDB()
     if (!db) return
     await transactionDone(db, 'readwrite', store => store.put({ ...payload, version: CACHE_VERSION }))
+    await enforceDiskLimit(db)
   } catch (error) {
     console.log(error)
+  }
+}
+
+/**
+ * 落盘容量治理：统计对象存储内全部条目的近似体积，超限按 fetchedAt 最旧优先淘汰，
+ * 始终保留至少一条（最新写入者，避免极端大条目导致写空）。
+ */
+const enforceDiskLimit = async(db: IDBDatabase): Promise<void> => {
+  try {
+    const all = await dbRequest<DiscographyPersist[]>(db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll())
+    const sized = all
+      .map(item => ({ id: item.artistId, fetchedAt: item.fetchedAt ?? 0, size: estimateSize(item) }))
+      .sort((a, b) => a.fetchedAt - b.fetchedAt)
+    let total = sized.reduce((sum, item) => sum + item.size, 0)
+    if (total <= DISK_CACHE_MAX_BYTES) return
+    const deleteIds: string[] = []
+    for (const item of sized) {
+      if (total <= DISK_CACHE_MAX_BYTES || deleteIds.length >= sized.length - 1) break
+      total -= item.size
+      deleteIds.push(item.id)
+    }
+    if (deleteIds.length) {
+      await transactionDone(db, 'readwrite', store => {
+        deleteIds.forEach(id => { store.delete(id) })
+      })
+    }
+  } catch (error) {
+    console.log(error)
+  }
+}
+
+const estimateSize = (data: DiscographyPersist): number => {
+  try {
+    return JSON.stringify(data).length
+  } catch {
+    return 0
   }
 }
 
