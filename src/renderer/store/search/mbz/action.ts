@@ -370,6 +370,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   searchState.searchKey = key
   searchState.isSearching = true
   searchState.groupTotal = null
+  searchState.artistMbid = null
   searchState.partialFailed = false
   searchState.progress.done = 0
   searchState.progress.total = 0
@@ -471,6 +472,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   lastResultKey = key
   lastSource = source
   searchState.groupTotal = result.groupTotal
+  searchState.artistMbid = artist.id
   // 全量作品集行（不分页）：版本与曲目由用户在界面上展开/选择
   const list = result.groups.map(group => toMbzGroupMusicInfo(group, source))
   listInfo.list = list

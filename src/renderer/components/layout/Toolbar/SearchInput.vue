@@ -3,7 +3,11 @@
     <material-search-input v-model="searchText" :style="{ '--lx-search-input-width': '100%', 'flex': 'none' }" :placeholder="inputPlaceholder" :list="tipList" :visible-list="visibleList" @event="handleEvent" />
     <div :class="$style.mbzArea">
       <base-checkbox v-show="showMbzCheckbox" id="toolbar_search_mbz_checkbox" v-model="mbz" :class="$style.mbzCheckbox" :label="$t('search__mbz_checkbox')" @change="handleMbzChange" />
-      <span v-show="showMbzSummary" :class="$style.mbzSummary">{{ mbzSummaryText }}<span v-show="mbzSearchState.partialFailed" :class="$style.mbzPartial" :aria-label="$t('search__mbz_partial_failed')">!</span></span>
+      <span v-show="showMbzSummary" :class="$style.mbzSummary">
+        <span v-if="showMbzSummaryLink" :class="$style.mbzSummaryLink" @click="handleOpenArtistPage">{{ mbzSummaryText }}</span>
+        <template v-else>{{ mbzSummaryText }}</template>
+        <span v-show="mbzSearchState.partialFailed" :class="$style.mbzPartial" :aria-label="$t('search__mbz_partial_failed')">!</span>
+      </span>
     </div>
     <material-modal :show="artistChoiceState.visible" :bg-close="true" @close="handleArtistChoiceCancel">
       <main :class="$style.artistChoice">
@@ -26,6 +30,7 @@ import {
   nextTick,
 } from '@common/utils/vueTools'
 import { useRouter, useRoute } from '@common/utils/vueRouter'
+import { openUrl } from '@common/utils/electron'
 import { appSetting } from '@renderer/store/setting'
 import { searchText as _searchText } from '@renderer/store/search/state'
 import { searchState as mbzSearchState, artistChoiceState, resolveArtistChoice } from '@renderer/store/search/mbz'
@@ -72,6 +77,18 @@ export default {
         official: window.i18n.t('tag__mbz_official'),
       })
     })
+    /** 艺术家官网主页地址（MusicBrainz artist 页面） */
+    const mbzArtistUrl = computed(() => {
+      return mbzSearchState.artistMbid ? `https://musicbrainz.org/artist/${mbzSearchState.artistMbid}` : ''
+    })
+    /** 有结果（groupTotal > 0）且已知艺术家 MBID 时，summary 文本渲染为超链接；0 作品集保持纯文本 */
+    const showMbzSummaryLink = computed(() => {
+      return (mbzSearchState.groupTotal ?? 0) > 0 && !!mbzSearchState.artistMbid
+    })
+    const handleOpenArtistPage = () => {
+      if (!mbzArtistUrl.value) return
+      void openUrl(mbzArtistUrl.value).catch(() => {})
+    }
     const inputPlaceholder = computed(() => {
       return showMbzCheckbox.value && mbz.value ? window.i18n.t('search__mbz_input_placeholder') : undefined
     })
@@ -197,6 +214,9 @@ export default {
       showMbzCheckbox,
       showMbzSummary,
       mbzSummaryText,
+      mbzArtistUrl,
+      showMbzSummaryLink,
+      handleOpenArtistPage,
       mbzSearchState,
       inputPlaceholder,
       handleMbzChange,
@@ -244,6 +264,15 @@ export default {
   white-space: nowrap;
   color: var(--color-font-label);
   -webkit-app-region: no-drag;
+}
+
+.mbzSummaryLink {
+  color: var(--color-primary);
+  cursor: pointer;
+  text-decoration: none;
+  &:hover {
+    text-decoration: underline;
+  }
 }
 
 .mbzPartial {

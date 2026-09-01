@@ -21,6 +21,8 @@ export declare interface MbzSearchState {
   searchKey: string
   /** 作品集总数（null=未完成搜索，不展示） */
   groupTotal: number | null
+  /** 当前搜索艺术家的 MBID（搜索成功时写入，供 summary 超链接到官网主页；空结果/未完成搜索为 null） */
+  artistMbid: string | null
   /** 部分拉取失败：已展示部分数据，后台正在补拉（summary 后显示叹号标识） */
   partialFailed: boolean
   progress: SearchProgress
@@ -40,6 +42,7 @@ export const searchState: MbzSearchState = reactive({
   isSearching: false,
   searchKey: '',
   groupTotal: null,
+  artistMbid: null,
   partialFailed: false,
   progress: {
     done: 0,
@@ -73,6 +76,7 @@ export const reset = () => {
   searchState.isSearching = false
   searchState.searchKey = ''
   searchState.groupTotal = null
+  searchState.artistMbid = null
   searchState.partialFailed = false
   searchState.progress.done = 0
   searchState.progress.total = 0
