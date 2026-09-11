@@ -29,7 +29,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from '@common/utils/vueTools'
 import { searchText } from '@renderer/store/search/state'
-import { listInfo, searchState, abortSearch, buildGroupTracks } from '@renderer/store/search/mbz'
+import { listInfo, searchState, buildGroupTracks } from '@renderer/store/search/mbz'
 import useList from './useList'
 
 interface Props {
@@ -96,11 +96,11 @@ const handlePlayList = (index: number) => {
   void handlePlayListBase(index, displayList.value)
 }
 
-// 切换页面/取消勾选（组件卸载）时中止进行中的 mbz 拉取：停止请求、结果不入缓存
+// 切换页面（组件卸载）不再中断进行中的 mbz 拉取（与原生一致，后台跑完并缓存、返回秒回）；
+// mbz 模式结束（取消勾选/切源到全部/切类型）的中止由 Search/index.vue 的 verifyQueryParams 触发 abortSearch
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => {
   clearTimeout(searchTimer)
-  abortSearch()
 })
 
 // 新搜索开始时清空展开/选版状态（listInfo.key 每次搜索都会更新；组行 meta.mbzReleaseId 随列表重建自然重置）
@@ -109,11 +109,17 @@ watch(() => listInfo.key, () => {
   rebuildList()
 })
 
-// 搜索完成/清空列表时重建展示列表（组行 meta 为 markRaw，深度监听 list 自身变化即可）
-watch(() => listInfo.list, rebuildList, { deep: true })
+// 搜索完成/清空列表时重建展示列表（组行 meta 为 markRaw，深度监听 list 自身变化即可）；
+// immediate：重挂载（如返回搜索页）时按内存保留的 listInfo.list 直接重建展示列表
+watch(() => listInfo.list, rebuildList, { deep: true, immediate: true })
 
 // 源/页/关键词任一变化触发搜索；合并为单一 watch 避免 text 与 source/page 同时变化时的重复 search
 watch([() => props.sourceId, () => props.page, searchText], ([sourceId, page, text]) => {
+  clearTimeout(searchTimer)
+  // 切页后重挂载：已有结果（listInfo.key 命中）或仍在后台拉取（searchState.searchKey 命中且 isSearching）
+  // 时都不重发——后台拉取继续完成并回填 store，返回秒回不重启搜索
+  const key = `${page || 1}__${sourceId}__${text}`
+  if (text && (listInfo.key === key || (searchState.searchKey === key && searchState.isSearching))) return
   searchTimer = setTimeout(() => {
     search(text || '', sourceId, page || 1)
   })

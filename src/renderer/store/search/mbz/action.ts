@@ -412,9 +412,12 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   } catch (error) {
     if ((error as Error)?.name == 'AbortError') {
       // 搜索已中止（切换页面/取消勾选/新搜索/清空搜索框）：静默退出，不更新 UI、不写缓存。
-      // 无更新的搜索接手时复位 isSearching；被新搜索替换时由新搜索负责管理
+      // 仅当无更新的搜索接手（孤立中止，即组件卸载/取消勾选）时复位整个搜索状态，
+      // 避免残留「看似终止但列表空白/过期进度」的半成品状态；被新搜索替换时由新搜索负责管理
       if (currentSearchController === searchController) {
-        searchState.isSearching = false
+        reset()
+        lastResult = null
+        lastResultKey = null
       }
       return []
     }
@@ -445,10 +448,12 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   } catch (error) {
     if ((error as Error)?.name == 'AbortError') {
       // 搜索已中止（切换页面/取消勾选/新搜索/清空搜索框）：静默退出，不更新 UI、不写缓存。
-      // 仅当无更新的搜索接手（currentSearchController 仍为本次控制器，即组件卸载/取消勾选触发的孤立中止）时
-      // 复位 isSearching；被新搜索替换时由新搜索负责管理，此处不干预
+      // 仅当无更新的搜索接手（孤立中止，即组件卸载/取消勾选）时复位整个搜索状态，
+      // 避免残留「看似终止但列表空白/过期进度」的半成品状态；被新搜索替换时由新搜索负责管理
       if (currentSearchController === searchController) {
-        searchState.isSearching = false
+        reset()
+        lastResult = null
+        lastResultKey = null
       }
       return []
     }

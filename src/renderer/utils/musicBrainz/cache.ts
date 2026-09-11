@@ -3,11 +3,10 @@
  * 搜索顺序：内存 → 落盘 → 网络；TTL 过期自动重拉；读写失败静默回退网络
  */
 
-export const CACHE_TTL_MS = 7 * 24 * 3600 * 1000
+export const CACHE_TTL_MS = 3 * 24 * 3600 * 1000
 /** 缓存数据结构版本，聚合逻辑变更时递增以废弃旧缓存。
- * 8→9（2026-08-31）：孤儿失败计数从 failedPages 拆分为独立字段 failedOrphans，
- * 并修正 8.32 孤儿全量检查的防御门槛与止损语义，旧缓存缺该字段，强制重拉。 */
-export const CACHE_VERSION = 9
+ * 9→10：官方发行判定口径修正（仅 Official），废弃曾计入 Withdrawn/全空组的旧缓存。 */
+export const CACHE_VERSION = 10
 
 export declare interface MbzArtistCredit {
   name: string

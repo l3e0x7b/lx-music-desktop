@@ -41,7 +41,7 @@ const PARTIAL_CACHE_MAX_FAILED_PAGES = 5
  * 达上限即终止本链，剩余数据交由 failedPages 语义承接（部分数据可用 + 下次搜索补拉） */
 const MAX_CONSECUTIVE_PAGE_FAILS = 3
 /** 不完整缓存后台补拉冷却：补拉持续失败（不覆盖缓存）时避免每次加载都重新触发全量重拉 */
-const REFILL_COOLDOWN_MS = 10 * 60 * 1000
+const REFILL_COOLDOWN_MS = 5 * 60 * 1000
 const UA = 'lx-music-desktop/2.12.2 (https://github.com/lyswhut/lx-music-desktop) +https://github.com/lyswhut/lx-music-desktop/issues'
 
 const httpFetchAsync = async(url: string, options?: Record<string, any>): Promise<{ statusCode: number, body: any }> => {
@@ -319,6 +319,17 @@ export const findArtistCandidates = async(artistName: string): Promise<MbzArtist
 
 const isVarious = (name: string) => /^various(?:\s+artists?)?$/i.test(name) || /^v\.?a\.?$/i.test(name)
 
+/** 官网「官方发行」判定（musicbrainz-server 物化表 unofficial 口径）：
+ * Official(1) / Withdrawn(5) / 未填状态(null，官网视为默认 Official) */
+const isOfficialStatus = (status?: string | null): boolean => status === 'Official' || status === 'Withdrawn' || status == null
+
+/** 可选择的真实版本（下拉/孤儿回填）：Official 或未填状态（null）；排除 Bootleg/Promotion/Withdrawn/Pseudo-Release */
+const isSelectableStatus = (status?: string | null): boolean => status === 'Official' || status == null
+
+/** 官方组判定：组内存在 Official/Withdrawn 版本即视为官方组 */
+const groupHasOfficial = (releases: MbzReleaseRaw[]): boolean =>
+  releases.some(release => isOfficialStatus(release.status))
+
 /** 官网 Discography 主类型小节顺序（Album → EP → Single → …） */
 const PRIMARY_TYPE_ORDER = ['Album', 'EP', 'Single', 'Compilation', 'Live', 'Other', 'Broadcast']
 /** MB 副类型 id（组合小节按 id 升序签名排序，如 Album+Compilation 先于 Album+Soundtrack） */
@@ -589,15 +600,16 @@ const browseAllPages = async <T,>(
 
 /**
  * 孤儿组检查：作品集归属该艺人但其 release 未出现在 release browse 中
- * （如 release 署名 Various Artists 的合辑），查询该组 release 并判定是否存在 Official 状态。
+ * （如 release 署名 Various Artists 的合辑），查询该组全量 release（不做官方预过滤，
+ * 官方与否由调用方按 groupHasOfficial 口径判定）。
  * 返回的 releases 带 recordings 内联（曲目/悬浮数据可直接用），由调用方并入全量列表
- * @returns 官方（或全部）releases；[]=无任何 release；null=请求失败（超时/网络，调用方按失败计数，可止损跳过）
+ * @returns 全量 releases；[]=无任何 release；null=请求失败（超时/网络，调用方按失败计数，可止损跳过）
  */
 const checkGroupOfficial = async(groupId: string): Promise<MbzReleaseRaw[] | null> => {
   try {
     const url = `${baseUrl}/release?release-group=${groupId}&fmt=json&limit=${PAGE_LIMIT}&inc=recordings+artist-credits+labels`
     const body = await apiFetch(url, 0, ORPHAN_TIMEOUT)
-    return (body?.releases as MbzReleaseRaw[] ?? []).filter(release => release.status == 'Official')
+    return body?.releases as MbzReleaseRaw[] ?? []
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') throw error
     console.log('[mbz] orphan check failed:', (error as Error)?.message ?? error)
@@ -662,7 +674,7 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
           const groupId = item['release-group']?.id
           if (groupId) {
             releaseGroupIds.add(groupId)
-            if (item.status == 'Official') officialGroupIds.add(groupId)
+            if (isOfficialStatus(item.status)) officialGroupIds.add(groupId)
           }
         }
         reportGroupProgress()
@@ -721,12 +733,13 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
           } else {
             // eslint-disable-next-line require-atomic-updates
             failStreak = 0
-            if (result.length) {
+            if (groupHasOfficial(result)) {
               orphanOfficial.push(groupId)
-              // 回填孤儿组 releases（含 recordings）：与 release browse 结果同池，
+              // 回填孤儿组可选择的真实版本（Official 或 null，含 recordings）：与 release browse 结果同池，
               // 孤儿组因此获得版本下拉/展开能力（该组 release 的 artist-credit 非本艺人，不会污染其他组）。
               // 注意：browse by release-group 响应不含 release-group 引用，需显式补上（聚合按此分组）
               for (const release of result) {
+                if (!isSelectableStatus(release.status)) continue
                 if (seenReleaseIds.has(release.id)) continue
                 seenReleaseIds.add(release.id)
                 if (!release['release-group']) release['release-group'] = { id: groupId }
@@ -774,7 +787,7 @@ const aggregateDiscography = (releases: MbzReleaseRaw[], groupRawList: MbzGroupR
   const groups: MbzGroupFull[] = []
   for (const meta of groupRawList) {
     const groupReleases = releasesByGroup.get(meta.id) ?? []
-    const official = groupReleases.some(release => release.status == 'Official') || orphanOfficial.has(meta.id)
+    const official = groupHasOfficial(groupReleases) || orphanOfficial.has(meta.id)
     if (!official) continue
     // 版本池：只保留官方发行（status == Official），与官网列表口径一致；无 Official 版时（孤儿组等）回退全部
     const pool = groupReleases.filter(release => release.status == 'Official')
@@ -810,75 +823,128 @@ const aggregateDiscography = (releases: MbzReleaseRaw[], groupRawList: MbzGroupR
   return { groups }
 }
 
-/** 进行中的作品集加载（并发去重：同艺人重复搜索复用同一加载任务） */
-const pendingLoad = new Map<string, Promise<DiscographyCache>>()
+/** 进行中的作品集加载项：共享 AbortController + 引用计数 + 进度广播。
+ * 同艺人重复搜索复用同一加载任务，但单个调用方的中止（切页/取消勾选/被新搜索替换）
+ * 不再连带 abort 掉其他仍需要的调用方；进度回调集合化广播，过期回调由上层 searchKey 守卫自行空转 */
+interface PendingLoadEntry {
+  promise: Promise<DiscographyCache>
+  controller: AbortController
+  refs: number
+  onProgress: Set<(done: number, total: number) => void>
+}
+
+const pendingLoad = new Map<string, PendingLoadEntry>()
 
 const loadDiscography = async(artistId: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<DiscographyCache> => {
-  const pending = pendingLoad.get(artistId)
-  if (pending) return pending
-  const task = (async() => {
-    let cache = artistCache.get(artistId)
-    if (!cache) {
-      // 落盘缓存读取（读失败静默回退网络）
-      const persisted = await cacheGet(artistId)
-      if (persisted?.releases?.length) {
+  let entry = pendingLoad.get(artistId)
+  if (!entry) {
+    const controller = new AbortController()
+    const progressCallbacks = new Set<(done: number, total: number) => void>()
+    const reportProgress = (done: number, total: number) => {
+      for (const cb of progressCallbacks) cb(done, total)
+    }
+    entry = {
+      controller,
+      refs: 0,
+      onProgress: progressCallbacks,
+      promise: Promise.resolve(undefined as unknown as DiscographyCache),
+    }
+    entry.promise = (async() => {
+      let cache = artistCache.get(artistId)
+      if (!cache) {
+        // 落盘缓存读取（读失败静默回退网络）
+        const persisted = await cacheGet(artistId)
+        if (persisted?.releases?.length) {
+          cache = {
+            raw: {
+              releases: persisted.releases,
+              groups: persisted.groups ?? [],
+              orphanOfficial: persisted.orphanOfficial ?? [],
+            },
+            aggregated: aggregateDiscography(persisted.releases, persisted.groups ?? [], new Set(persisted.orphanOfficial ?? [])),
+            failedPages: persisted.failedPages ?? 0,
+            failedOrphans: persisted.failedOrphans ?? 0,
+          }
+          artistCacheSet(artistId, cache)
+        }
+      }
+      // 缓存命中（内存/落盘）：进度直接置为实际聚合后的官方作品集数，避免命中缓存的快速加载期间短暂显示 0/1
+      if (cache) reportProgress(cache.aggregated.groups.length, cache.aggregated.groups.length)
+      if (!cache) {
+        const payload = await fetchDiscography(artistId, reportProgress, controller.signal)
+        const aggregated = aggregateDiscography(payload.releases, payload.groups, new Set(payload.orphanOfficial))
+        // 最终进度修正为实际聚合后的作品集数（browse 原始组数包含无官方发行等过滤项）
+        reportProgress(aggregated.groups.length, aggregated.groups.length)
         cache = {
-          raw: {
-            releases: persisted.releases,
-            groups: persisted.groups ?? [],
-            orphanOfficial: persisted.orphanOfficial ?? [],
-          },
-          aggregated: aggregateDiscography(persisted.releases, persisted.groups ?? [], new Set(persisted.orphanOfficial ?? [])),
-          failedPages: persisted.failedPages ?? 0,
-          failedOrphans: persisted.failedOrphans ?? 0,
+          raw: { releases: payload.releases, groups: payload.groups, orphanOfficial: payload.orphanOfficial },
+          aggregated,
+          failedPages: payload.failedPages,
+          failedOrphans: payload.failedOrphans,
         }
-        artistCacheSet(artistId, cache)
-      }
-    }
-    // 缓存命中（内存/落盘）：进度直接置为实际聚合后的官方作品集数，避免命中缓存的快速加载期间短暂显示 0/1
-    if (cache) onProgress?.(cache.aggregated.groups.length, cache.aggregated.groups.length)
-    if (!cache) {
-      const payload = await fetchDiscography(artistId, onProgress, signal)
-      const aggregated = aggregateDiscography(payload.releases, payload.groups, new Set(payload.orphanOfficial))
-      // 最终进度修正为实际聚合后的作品集数（browse 原始组数包含无官方发行等过滤项）
-      onProgress?.(aggregated.groups.length, aggregated.groups.length)
-      cache = {
-        raw: { releases: payload.releases, groups: payload.groups, orphanOfficial: payload.orphanOfficial },
-        aggregated,
-        failedPages: payload.failedPages,
-        failedOrphans: payload.failedOrphans,
-      }
-      // 部分失败（失败页数少）也入缓存：网络差时避免「几分钟白跑且下次重来」，
-      // 命中不完整缓存后由后台静默补拉（refillDiscography）补全。
-      // 孤儿组失败单独计数，不阻断缓存准入（主数据页完整即可缓存），但会持久化并触发后台补拉。
-      if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
-        artistCacheSet(artistId, cache)
-        // 有效数据落盘缓存（空结果不缓存，避免阻隔下次重试）
-        if (payload.releases.length) {
-          await cacheSave({
-            artistId,
-            releases: payload.releases,
-            groups: payload.groups,
-            orphanOfficial: payload.orphanOfficial,
-            fetchedAt: Date.now(),
-            failedPages: payload.failedPages,
-            failedOrphans: payload.failedOrphans,
-          } satisfies DiscographyPersist)
+        // 部分失败（失败页数少）也入缓存：网络差时避免「几分钟白跑且下次重来」，
+        // 命中不完整缓存后由后台静默补拉（refillDiscography）补全。
+        // 孤儿组失败单独计数，不阻断缓存准入（主数据页完整即可缓存），但会持久化并触发后台补拉。
+        if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
+          artistCacheSet(artistId, cache)
+          // 有效数据落盘缓存（空结果不缓存，避免阻隔下次重试）
+          if (payload.releases.length) {
+            await cacheSave({
+              artistId,
+              releases: payload.releases,
+              groups: payload.groups,
+              orphanOfficial: payload.orphanOfficial,
+              fetchedAt: Date.now(),
+              failedPages: payload.failedPages,
+              failedOrphans: payload.failedOrphans,
+            } satisfies DiscographyPersist)
+          }
         }
       }
+      // 命中不完整数据（页失败或孤儿失败）：后台静默补拉（不阻塞 UI，完成后覆盖内存与落盘缓存）；
+      // 冷却期内的重复加载不再触发，防止补拉持续失败时每次搜索都全量重拉挤占限流窗口
+      if ((cache.failedPages > 0 || cache.failedOrphans > 0) && Date.now() - (lastRefillAt.get(artistId) ?? 0) >= REFILL_COOLDOWN_MS) {
+        void refillDiscography(artistId)
+      }
+      return cache
+    })()
+    // 任务完成后自清理（仅当仍是当前项时删除，避免误删后续重建的同 id 项）
+    const cleanup = () => {
+      if (pendingLoad.get(artistId) === entry) pendingLoad.delete(artistId)
     }
-    // 命中不完整数据（页失败或孤儿失败）：后台静默补拉（不阻塞 UI，完成后覆盖内存与落盘缓存）；
-    // 冷却期内的重复加载不再触发，防止补拉持续失败时每次搜索都全量重拉挤占限流窗口
-    if ((cache.failedPages > 0 || cache.failedOrphans > 0) && Date.now() - (lastRefillAt.get(artistId) ?? 0) >= REFILL_COOLDOWN_MS) {
-      void refillDiscography(artistId)
-    }
-    return cache
-  })()
-  pendingLoad.set(artistId, task)
+    entry.promise.then(cleanup, cleanup)
+    pendingLoad.set(artistId, entry)
+  }
+  const currentEntry = entry
+
+  // 登记本调用方：加入进度广播集合并计数
+  if (onProgress) currentEntry.onProgress.add(onProgress)
+  currentEntry.refs++
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    if (onProgress) currentEntry.onProgress.delete(onProgress)
+    currentEntry.refs--
+    // 仅当无任何调用方仍需要本次拉取时才真正中止共享任务
+    if (currentEntry.refs <= 0) currentEntry.controller.abort()
+  }
+
   try {
-    return await task
+    if (signal) {
+      if (signal.aborted) throw new DOMException('The operation was aborted', 'AbortError')
+      // 用调用方自身 signal 与共享任务竞速：调用方中止即抛 AbortError，共享任务不受影响
+      return await new Promise<DiscographyCache>((resolve, reject) => {
+        const onAbort = () => { reject(new DOMException('The operation was aborted', 'AbortError')) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        currentEntry.promise.then(
+          value => { signal.removeEventListener('abort', onAbort); resolve(value) },
+          error => { signal.removeEventListener('abort', onAbort); reject(error) },
+        )
+      })
+    }
+    return await currentEntry.promise
   } finally {
-    pendingLoad.delete(artistId)
+    release()
   }
 }
 
@@ -930,7 +996,7 @@ const refillDiscography = async(artistId: string): Promise<void> => {
 /**
  * 获取指定艺术家的全部作品集候选（与官网 overview 口径一致：
  * 按 release-group 聚合，仅保留含 Official release 的作品集）
- * 数据来源顺序：内存缓存 → IndexedDB 落盘缓存（TTL 7 天）→ 网络拉取
+ * 数据来源顺序：内存缓存 → IndexedDB 落盘缓存（TTL 3 天）→ 网络拉取
  * @param artistId MusicBrainz 艺术家 MBID
  * @param onProgress 进度回调（已拉页数, 预估页数）
  * @param signal 中断信号：中止时停止拉取并抛 AbortError（调用方静默处理，结果不入缓存）
