@@ -7,6 +7,7 @@ import {
   findArtistCandidates,
   getArtistDiscography,
   groupTracks,
+  cancelAllRefills,
   type MbzArtist,
   type MbzCandidate,
   type MbzGroupFull,
@@ -77,10 +78,12 @@ export const closeArtistChoice = () => {
   resolveArtistChoice(null)
 }
 
-/** 中止当前 mbz 搜索（组件卸载时调用；中止后不更新 UI、不写缓存） */
+/** 中止当前 mbz 搜索（组件卸载时调用；中止后不更新 UI、不写缓存）。
+ * mbz 模式结束（取消勾选/切源到全部/切类型）时同时停止后台自动补拉循环 */
 export const abortSearch = () => {
   closeArtistChoice()
   currentSearchController?.abort()
+  cancelAllRefills()
 }
 
 const intervalToSecond = (interval: string | null | undefined): number => {
@@ -351,10 +354,11 @@ const getArtistCandidates = async(text: string, signal?: AbortSignal): Promise<M
 
 export const search = async(text: string, source: LX.OnlineSource, page: number): Promise<LX.Music.MusicInfo[]> => {
   if (!text) {
-    // 清空搜索框（v-show 隐藏，组件不卸载）：中止进行中的拉取并关闭可能打开的艺术家选择弹窗，
-    // 同时清空已选艺术家记忆——用户清空后重搜同词应重新弹选择器，而非沿用旧选择
+    // 清空搜索框（v-show 隐藏，组件不卸载）：中止进行中的拉取 + 后台自动补拉循环，
+    // 并关闭可能打开的艺术家选择弹窗；同时清空已选艺术家记忆——用户清空后重搜同词应重新弹选择器，而非沿用旧选择
     closeArtistChoice()
     currentSearchController?.abort()
+    cancelAllRefills()
     chosenArtistCache.clear()
     reset()
     lastResult = null
@@ -505,6 +509,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
       if (currentSearchController !== searchController || !fresh || searchState.searchKey != key) return
       searchState.partialFailed = fresh.failedPages > 0 || fresh.failedOrphans > 0
       lastResult = fresh
+      searchState.groupTotal = fresh.groupTotal
       const freshList = fresh.groups.map(group => toMbzGroupMusicInfo(group, source))
       listInfo.list = freshList
       listInfo.total = fresh.groupTotal

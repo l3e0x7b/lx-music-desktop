@@ -40,7 +40,7 @@ const PARTIAL_CACHE_MAX_FAILED_PAGES = 5
 /** 页级连续失败熔断：首页即持续失败时 total 未知、主循环无自然出口（后台补拉链甚至没有 signal），
  * 达上限即终止本链，剩余数据交由 failedPages 语义承接（部分数据可用 + 下次搜索补拉） */
 const MAX_CONSECUTIVE_PAGE_FAILS = 3
-/** 不完整缓存后台补拉冷却：补拉持续失败（不覆盖缓存）时避免每次加载都重新触发全量重拉 */
+/** 自动补拉循环的重试冷却（补拉失败后间隔 5 分钟自动重试一次，直至补全或被取消） */
 const REFILL_COOLDOWN_MS = 5 * 60 * 1000
 const UA = 'lx-music-desktop/2.12.2 (https://github.com/lyswhut/lx-music-desktop) +https://github.com/lyswhut/lx-music-desktop/issues'
 
@@ -541,7 +541,7 @@ const fetchGroupMetaPage = async(artistId: string, offset: number): Promise<{ it
 
 /**
  * 逐页 browse 直到取满 count 或空页（页级容错：失败页记录后跳过；连续失败达上限熔断终止本链，
- * 剩余缺失由 failedPages 上抛、后台 refillDiscography 补拉）
+ * 剩余缺失由 failedPages 上抛、后台自动补拉循环（startRefillLoop）补齐）
  * 带 recordings 内联时服务端会按响应体积截断（页大小不定），因此以「实际返回条数」推进 offset，
  * 保证不因页大小变化漏数据
  * @param fetchPage 按 offset 拉取一页（offset 为条目索引）
@@ -594,7 +594,7 @@ const browseAllPages = async <T,>(
     if (!items.length && count > offset) failedOffsets.add(offset)
     if (!items.length || (total && offset >= total)) break
   }
-  // 补拉由外层的 loadDiscography → refillDiscography 后台异步完成，不在此阻塞
+  // 补拉由外层 getArtistDiscography → startRefillLoop 后台异步完成，不在此阻塞
   return { failedPages: failedOffsets.size }
 }
 
@@ -882,8 +882,8 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
           failedOrphans: payload.failedOrphans,
         }
         // 部分失败（失败页数少）也入缓存：网络差时避免「几分钟白跑且下次重来」，
-        // 命中不完整缓存后由后台静默补拉（refillDiscography）补全。
-        // 孤儿组失败单独计数，不阻断缓存准入（主数据页完整即可缓存），但会持久化并触发后台补拉。
+        // 命中不完整缓存后由后台自动补拉循环（startRefillLoop）补全；此处不触发（由 getArtistDiscography 统一启动/复用）。
+        // 孤儿组失败单独计数，不阻断缓存准入（主数据页完整即可缓存），但已持久化供补拉判定。
         if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
           artistCacheSet(artistId, cache)
           // 有效数据落盘缓存（空结果不缓存，避免阻隔下次重试）
@@ -900,11 +900,8 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
           }
         }
       }
-      // 命中不完整数据（页失败或孤儿失败）：后台静默补拉（不阻塞 UI，完成后覆盖内存与落盘缓存）；
-      // 冷却期内的重复加载不再触发，防止补拉持续失败时每次搜索都全量重拉挤占限流窗口
-      if ((cache.failedPages > 0 || cache.failedOrphans > 0) && Date.now() - (lastRefillAt.get(artistId) ?? 0) >= REFILL_COOLDOWN_MS) {
-        void refillDiscography(artistId)
-      }
+      // 命中不完整数据（页失败或孤儿失败）不由这里触发补拉：
+      // 自动补拉循环（startRefillLoop）由 getArtistDiscography 按 cache 是否完整统一启动/复用
       return cache
     })()
     // 任务完成后自清理（仅当仍是当前项时删除，避免误删后续重建的同 id 项）
@@ -948,25 +945,41 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
   }
 }
 
-/** 不完整缓存的后台静默补拉（并发去重 + 冷却：补拉持续失败不覆盖缓存时，避免每次加载都触发全量重拉） */
-const pendingRefill = new Map<string, Promise<void>>()
-const lastRefillAt = new Map<string, number>()
+/** 不完整缓存的后台自动补拉循环（per-artist 幂等）：首次立即跑，失败后按冷却调度自动重试直至完整，
+ * 或直到被取消（取消勾选/切源到全部/切类型/清空搜索框，走 cancelAllRefills）。
+ * 补拉结果过差（失败页超限）时不覆盖旧缓存；孤儿失败单独计数不阻断覆盖（主数据页完整即可写缓存） */
+const refillLoops = new Map<string, {
+  done: Promise<void>
+  controller: AbortController
+  cancel: () => void
+}>()
 
-const refillDiscography = async(artistId: string): Promise<void> => {
-  const pending = pendingRefill.get(artistId)
-  if (pending) return pending
-  const task = (async() => {
-    lastRefillAt.set(artistId, Date.now())
+const startRefillLoop = async(artistId: string): Promise<void> => {
+  const existing = refillLoops.get(artistId)
+  if (existing) return existing.done
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let settled = false
+  let finish!: () => void
+  const done = new Promise<void>(resolve => {
+    finish = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+  })
+
+  const attempt = async() => {
     try {
-      const payload = await fetchDiscography(artistId)
+      const payload = await fetchDiscography(artistId, undefined, controller.signal)
       const cache = {
         raw: { releases: payload.releases, groups: payload.groups, orphanOfficial: payload.orphanOfficial },
         aggregated: aggregateDiscography(payload.releases, payload.groups, new Set(payload.orphanOfficial)),
         failedPages: payload.failedPages,
         failedOrphans: payload.failedOrphans,
       }
-      // 与主趟同阈值：补拉结果过差（失败页超限）时不覆盖，保留原缓存等下次再补；
-      // 孤儿失败单独计数，不阻断覆盖（主数据页完整即可），随缓存持久化并由下次加载继续触发补拉
+      // 与主趟同阈值：补拉结果过差（失败页超限）时不覆盖，保留原缓存再等下轮；
+      // 孤儿失败单独计数，不阻断覆盖（主数据页完整即可写缓存）
       if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
         artistCacheSet(artistId, cache)
         if (payload.releases.length) {
@@ -981,16 +994,51 @@ const refillDiscography = async(artistId: string): Promise<void> => {
           } satisfies DiscographyPersist)
         }
       }
+      // 完整（页失败与孤儿失败均归零）才终止；否则冷却后自动重试
+      if (payload.failedPages === 0 && payload.failedOrphans === 0) {
+        finish()
+        return
+      }
+      if (controller.signal.aborted) {
+        finish()
+        return
+      }
+      timer = setTimeout(attempt, REFILL_COOLDOWN_MS)
     } catch (error) {
+      if ((error as Error)?.name == 'AbortError') {
+        finish()
+        return
+      }
       console.log('[mbz] refill failed:', (error as Error)?.message ?? error)
+      if (controller.signal.aborted) {
+        finish()
+        return
+      }
+      timer = setTimeout(attempt, REFILL_COOLDOWN_MS)
     }
-  })()
-  pendingRefill.set(artistId, task)
-  try {
-    return task
-  } finally {
-    pendingRefill.delete(artistId)
   }
+  void attempt()
+
+  const loop = {
+    done,
+    controller,
+    cancel: () => {
+      clearTimeout(timer)
+      controller.abort()
+      finish()
+    },
+  }
+  refillLoops.set(artistId, loop)
+  void done.finally(() => {
+    if (refillLoops.get(artistId) === loop) refillLoops.delete(artistId)
+  })
+  return done
+}
+
+/** 取消全部进行中的自动补拉循环（mbz 模式结束：取消勾选/切源到全部/切类型/清空搜索框时调用） */
+export const cancelAllRefills = () => {
+  for (const loop of refillLoops.values()) loop.cancel()
+  refillLoops.clear()
 }
 
 /**
@@ -1005,12 +1053,15 @@ const refillDiscography = async(artistId: string): Promise<void> => {
 export const getArtistDiscography = async(artistId: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<MbzRangeResult> => {
   const cache = await loadDiscography(artistId, onProgress, signal)
   const groups = cache.aggregated.groups
+  const incomplete = cache.failedPages > 0 || cache.failedOrphans > 0
   return {
     groups,
     groupTotal: groups.length,
     failedPages: cache.failedPages,
     failedOrphans: cache.failedOrphans,
-    refilled: pendingRefill.get(artistId) ?? Promise.resolve(),
+    // 不完整时启动/复用自动补拉循环：done 在「补全成功」或「被取消」时 resolve，
+    // action 端据此重读缓存收敛叹号/列表/summary；完整时直接 resolve
+    refilled: incomplete ? startRefillLoop(artistId) : Promise.resolve(),
   }
 }
 
@@ -1019,8 +1070,7 @@ export const clearMusicBrainzCache = async(): Promise<void> => {
   artistCache.clear()
   groupTracksCache.clear()
   pendingLoad.clear()
-  pendingRefill.clear()
-  lastRefillAt.clear()
+  cancelAllRefills()
   await cacheClearAll()
 }
 
