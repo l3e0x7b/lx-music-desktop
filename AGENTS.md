@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-LX Music（洛雪音乐助手）桌面版：一个基于 **Electron 40 + Vue 3** 的跨平台音乐软件（Windows 7+ / macOS / Linux）。负责从用户自定义的"音乐源"（User API）获取搜索结果与歌曲链接，实现在线搜索、歌单、排行榜、本地音乐库管理、歌词显示（含桌面歌词）、下载、多设备数据同步、开放 API 等服务。
+LX Music（洛雪音乐助手）桌面版：一个基于 **Electron 42 + Vue 3** 的跨平台音乐软件（Windows 7+ / macOS / Linux）。负责从用户自定义的"音乐源"（User API）获取搜索结果与歌曲链接，实现在线搜索、歌单、排行榜、本地音乐库管理、歌词显示（含桌面歌词）、下载、多设备数据同步、开放 API 等服务。
 
 - 语言：TypeScript + JavaScript（Vue 3 组件，部分使用 Pug 模板 + Less 样式）
 - 存储：`better-sqlite3`（SQLite，位于 main 进程 worker 线程）；JSON 配置文件（`store.ts`）
@@ -12,12 +12,12 @@ LX Music（洛雪音乐助手）桌面版：一个基于 **Electron 40 + Vue 3**
 
 ## 仓库定位与分支约定
 
-本仓库为上游 `lyswhut/lx-music-desktop` 的 fork（本仓库名 `l3e0x7b/lx-music-desktop`），基于原生 **v2.12.2** 改造（当前特性：mbz 作品集搜索）。以下约定**仅适用于本仓库**，与上游发布策略无关：
+本仓库为上游 `lyswhut/lx-music-desktop` 的 fork（本仓库名 `l3e0x7b/lx-music-desktop`），在原生 **v2.12.x（当前 2.12.5）** 之上改造（当前特性：mbz 作品集搜索）。本分支与上游 **master 保持同步**（已完整合并上游 v2.12.5 / Electron 42 / 纯 JS qrc_decode 等全部改动）。以下约定**仅适用于本仓库**：
 
-- **版本号固定为 2.12.2**，不随上游升级；
-- **交付产物**：当前分支**仅构建 win 绿色版** `lx-music-desktop-v2.12.2-mbz-win_x64-green.7z`，其余平台/安装包/win7 等目标暂不构建（见「打包」）；
+- **版本号跟随上游 master**：合并后即上游当前版本（`package.json` version，当前 2.12.5）；再次与上游同步后以合并结果为准；
+- **交付产物**：当前分支**仅构建 win 绿色版** `lx-music-desktop-v{version}-mbz-win_x64-green.7z`（`{version}` 跟随上游版本），其余平台/安装包/win7 等目标暂不构建（见「打包」）；
 - git `origin` 与 `build-config/build-pack.js` 的 `publish` 目标均指向自有仓库（`l3e0x7b/lx-music-desktop`）；
-- 与上游同步（rebase/merge）或向上游提交时，注意排除上述本地化改动。
+- **与上游同步**：直接 `git merge origin/master`（保留历史，不 rebase）。mbz 本地改动集中在少数稳定文件（`build-config/build-pack.js` 的 publish owner 与 `-mbz-` 命名、`music.d.ts`、`src/lang/*`），与上游改动区域重叠小、冲突概率低；合并后需执行「打包前核对 + 清理 + lint/tsc」复核清单（见「与上游同步」章节）。
 
 ## 顶层目录
 
@@ -33,7 +33,7 @@ src/
   lang/             i18n 词典与自定义 i18n 引擎
   static/           静态资源（任务栏/托盘图片等）
 build-config/
-  lib/              本地提交的原生模块二进制（qrc_decode / better_sqlite3，勿自行重建）
+  lib/              上游保留的 linux/win32 专用 better_sqlite3 二进制（仅 linux 与 win7 路径使用；win 常规构建走 better-sqlite3 npm prebuilds）
 publish/            版本管理与发布脚本（npm run publish）
 resources/          打包资源（图标、license 等）
 doc/                文档图片等资源
@@ -112,7 +112,12 @@ PLAN.md             本 fork 的 mbz 作品集搜索功能开发计划（对应 
 ### i18n（src/lang/）
 
 - 自定义引擎，**非 vue-i18n**：`src/lang/i18n.ts`（`createI18n()`、`useI18n()`、`$t`、`fillMessage` 插值 `{key}`）。
-- 词典为平面 JSON key：`zh-cn.json`、`zh-tw.json`、`en-us.json`，语言元数据 `languages.json`。**新增 key 时三个语言文件必须同步**。回退链到 zh-cn。
+- 词典为平面 JSON key：`zh-cn.json`、`zh-tw.json`、`en-us.json`、`ko-kr.json`，语言元数据 `languages.json`。**新增 key 时四个语言文件必须同步**（`keyof Message` 取四语言 key 交集，漏加任何一语言都会致 tsc 类型报错）。回退链到 zh-cn。
+
+### qrc_decode 与原生模块（音频解码）
+
+- **qrc_decode（QRC 歌词解密）已在上游 v2.12.x 改为纯 JS 实现**（`src/renderer/utils/musicSdk/tx/qrcDecode.js`），不再有 native 模块与主进程 IPC 解码器（`winMain/rendererEvent/{kw,tx}_decodeLyric.ts` 已删）；Search 页歌词解析、tx/kw 歌词获取全部走渲染进程纯 JS 路径。
+- **better-sqlite3**：常规 win 构建使用 npm 包自带 prebuilds（`build-config/deps.js` 的 `copyLib` 在 `postinstall.js` 中执行，从 `node_modules/better-sqlite3/prebuilds/` 复制）；linux 与 win7（Electron 22）路径使用 `build-config/lib/` 中上游提交的专用二进制。**不要改动 `build-config/lib/` 中的二进制**。
 
 ### 多窗口/渲染子应用
 
@@ -122,12 +127,12 @@ PLAN.md             本 fork 的 mbz 作品集搜索功能开发计划（对应 
 ## 构建 / 开发
 
 - 4 个独立 webpack target：`main`（dist/main.js）、`renderer`（dist/renderer.js）、`renderer-lyric`（dist/lyric.html）、`renderer-scripts`（dist/user-api-preload.js，User API preload）。配置在 `build-config/<target>/`，`webpack-merge` 组合 base/dev/prod。
-- **开发**：`npm run dev` → `build-config/runner-dev.js` 并行启动 2 个 `webpack-dev-server`（端口 9080 / 9081）+ main 与 scripts 的 `watch`；主进程变动后自动 `tree-kill` 重启 Electron（`--inspect=5858`）。先 `replaceLib()`（`build-before-pack`）换原生模块。
+- **开发**：`npm run dev` → `build-config/runner-dev.js` 并行启动 2 个 `webpack-dev-server`（端口 9080 / 9081）+ main 与 scripts 的 `watch`；主进程变动后自动 `tree-kill` 重启 Electron（`--inspect=5858`）。先 `replaceLib()`（`build-before-pack` → `deps.js` 的 `beforePack`/`copyLib`，按平台复制 better-sqlite3 预编译绑定）。
 - **生产**：`npm run build`（`build-config/pack.js` 并行跑 4 个 prod 编译）→ `npm install`.
 
-> 注意：`postinstall` 为 `electron-builder install-app-deps`，会重新编译原生依赖；`build-config/lib/` 中为各平台/ABI 的预编译 `.node`（当前 Electron ABI v143，Electron 22 用 v110），由 `build-before-pack.js` 拷贝/替换，**不要改动 net 或 lib 中的二进制**。若需重新构建原生模块，参考 `build-config/lib-update.js`（解包 tar.gz 到规范命名）。
+> 注意：`postinstall` 为 `node build-config/postinstall.js`（调用 `deps.js` 的 `copyLib`，从 `node_modules/better-sqlite3/prebuilds/` 复制对应平台 prebuild），不再执行 `electron-builder install-app-deps`；`build-config/lib/` 中仅剩上游保留的 linux/win32 专用 better_sqlite3 二进制（win 常规构建走 npm prebuilds；linux 与 win7 路径使用 lib/），**不要改动 lib/ 中的二进制**。若需重新构建原生模块，参考 `build-config/lib-update.js`（解包 tar.gz 到规范命名）。
 
-- **打包**：`build-config/build-pack.js`（electron-builder）。脚本保留上游完整目标矩阵：win（nsis/7z/portable/win7_*）、linux（deb/AppImage/pacman/rpm）、mac（dmg）；但**本分支当前仅构建 win 绿色版**，产物 `lx-music-desktop-v2.12.2-mbz-win_x64-green.7z`，其余目标暂不构建。平台差异：win 用 NSIS（语言 2052，`lxmusic` 协议），linux 自定义 `.desktop`（`x-scheme-handler/lxmusic`），mac `afterPack` 写 InfoPlist.strings 本地化（electron-builder 问题 #4630 workaround）。产物命名由 `artifactName` 决定；本仓库的版本固定与 `mbz` 命名标识约定见「仓库定位与分支约定」。
+- **打包**：`build-config/build-pack.js`（electron-builder）。脚本保留上游完整目标矩阵：win（nsis/7z/portable/win7_*）、linux（deb/AppImage/pacman/rpm）、mac（dmg）；但**本分支当前仅构建 win 绿色版**，产物 `lx-music-desktop-v{version}-mbz-win_x64-green.7z`（version 跟随上游，当前 2.12.5），其余目标暂不构建。平台差异：win 用 NSIS（语言 2052，`lxmusic` 协议），linux 自定义 `.desktop`（`x-scheme-handler/lxmusic`），mac `afterPack` 写 InfoPlist.strings 本地化（electron-builder 问题 #4630 workaround）。产物命名由 `artifactName` 决定；本仓库的版本跟随与 `mbz` 命名标识约定见「仓库定位与分支约定」。
 - **发布**：GitHub Actions。
   - `release.yml`（master 触发）→ 4 任务（win / win7 / mac / linux）`publish:*` 上传 GitHub Releases。
   - `beta-pack.yml`（beta 触发）→ `pack:*` + upload artifact。
@@ -146,11 +151,20 @@ PLAN.md             本 fork 的 mbz 作品集搜索功能开发计划（对应 
 
 - **遵守 IPC 通道规范**：新通道先加进 `src/common/ipcNames.ts` 的命名空间表，再在目标模块注册 handler；渲染端统一走 `src/renderer/utils/ipc.ts` 封装。不要使用硬编码通道。
 - **列表 / 播放列表变更**：修改数据要经主进程 IPC（`player_*` / `winMain_*`），且记得前端 `registerListAction` 的镜像订阅。
-- **新增语言 key**：`zh-cn.json` / `zh-tw.json` / `en-us.json` 三文件同步修改，否则 i18n 回退到 zh-cn。
+- **新增语言 key**：`zh-cn.json` / `zh-tw.json` / `en-us.json` / `ko-kr.json` 四文件同步修改，否则 i18n 回退到 zh-cn。
 - **主题**：新增 CSS 变量进主题生成的 token 集合，需要同步 `src/common/theme/index.json`/createThemes.js 与主进程解析逻辑。
 - **User API 相关**：修改脚本执行环境注意沙箱/隔离设置与 webpack external（native modules 不得被 bundled）。
 - **DB 变更**：改 `dbService`（tables/migrate/单独模块 service）时递增 `DB_VERSION` 并写 `migrate.ts`。
 - **保持 git 提交粒度**：本仓库为上游 fork 开发分支，建议新功能先 Issue；提交前检查 `git diff`。
+
+## 与上游同步
+
+- **方式**：`git merge origin/master`（保留历史，不 rebase），并发布到 `origin/opencode/feat`。
+- **合并后复核清单**（每次上游更新后执行）：
+  1. **核对 fork 本地改动是否被覆盖**：`build-config/build-pack.js` 的 publish owner（`l3e0x7b`）与 green 命名（`-mbz-`）、`src/lang/*` 的 mbz keys 四语齐全（含 `ko-kr.json`）。
+  2. **清理废弃产物**：上游若弃用某 native 二进制（如 qrc_decode 已纯 JS 化），删除 `build-config/lib/` 中相应的 `.node` 孤儿文件。
+  3. **依赖与应用版本**：`npm install`（postinstall 走 `node build-config/postinstall.js` 复制 better-sqlite3 prebuilds），确认 `package.json` version 已随上游提升、AGENTS「仓库定位」版本描述同步更新。
+  4. **校验**：`npm run lint`、`npx tsc --noEmit -p src/renderer/tsconfig.json`、手动构建 win 绿色版（`npm run pack:win:7z:x64`）验证产物名 `lx-music-desktop-v{新版本}-mbz-win_x64-green.7z`。
 
 ## 开发环境
 
