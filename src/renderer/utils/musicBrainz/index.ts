@@ -170,7 +170,9 @@ export interface MbzArtist {
   area: string
   /** 出道/成立时间（life-span.begin 或 begin.year，如 1969-08-08 / 1930） */
   begin: string
-  /** 匹配得分：名称全等 +3 / 名称包含 +1 / 别名全等 +2 / 别名包含 +1；rank>=2 视为与搜索词全等命中（重名判定用） */
+  /** 匹配得分：名称全等 +3；否则 名称包含 +1 / 别名全等 +2；rank>=2 视为与搜索词全等命中（重名判定用）。
+   * 名称全等时不再叠加别名全等分（别名多为名称的大小写变体，双计会把同分档艺人挤到首位、
+   * 偏离官网 score 顺序，如 "Twins" 的 US TWINS 艺人 rank5 压过 score=100 的香港 Twins） */
   rank: number
 }
 
@@ -277,8 +279,11 @@ const artistCacheSet = (artistId: string, cache: DiscographyCache) => {
 
 /**
  * 按艺术家名查询 MusicBrainz 艺术家候选（支持中文/别名）
- * 使用带引号的精确短语查询（artist/alias），并对结果按「名称/别名精确匹配」加权排序，
- * 修正 MB 相关性排序噪声（如 "Jay Chou" 首位误排 "Chou Chou"、"Beyond" 排到 "Above & Beyond" 等）
+ * 使用默认字段带引号精确短语查询（与官网简单搜索同口径：默认字段覆盖艺术家名与别名，
+ * 精确命中得最高分排首位；带引号短语保持多词精确，无「Chou Chou」类分词噪声）。
+ * 结果再按「名称/别名精确匹配」加权排序兜底。
+ * 注：显式字段短语 `artist:"x" OR alias:"x"` 对常用英文词（如 "Twins"）会把
+ * 名字全等的目标艺人压到 20 位开外，被 limit 截断（官网默认口径则列首位，实测 8 组名字全中）
  * @param artistName 艺术家名或别名
  * @returns 艺术家候选列表（按匹配度排序）
  */
@@ -286,8 +291,8 @@ export const findArtistCandidates = async(artistName: string): Promise<MbzArtist
   const name = artistName.trim()
   if (!name) return []
   const escaped = name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  const query = `artist:"${escaped}" OR alias:"${escaped}"`
-  const url = `${baseUrl}/artist?query=${encodeURIComponent(query)}&fmt=json&limit=10&inc=aliases`
+  const query = `"${escaped}"`
+  const url = `${baseUrl}/artist?query=${encodeURIComponent(query)}&fmt=json&limit=25&inc=aliases`
   const body = await apiFetch(url)
   if (!body?.artists?.length) return []
   const target = name.toLowerCase()
@@ -296,10 +301,12 @@ export const findArtistCandidates = async(artistName: string): Promise<MbzArtist
       const aliases: any[] = ((item.aliases ?? []) as any[]).map((alias: any) => alias.name).filter(Boolean)
       const lowerName = String(item.name ?? '').toLowerCase()
       let rank = 0
-      if (lowerName == target) rank += 3
-      else if (lowerName.includes(target)) rank += 1
-      if (aliases.some(alias => alias.toLowerCase() == target)) rank += 2
-      else if (aliases.some(alias => alias.toLowerCase().includes(target))) rank += 1
+      if (lowerName == target) {
+        rank += 3
+      } else {
+        if (lowerName.includes(target)) rank += 1
+        if (aliases.some(alias => alias.toLowerCase() == target)) rank += 2
+      }
       const gender = String(item.gender ?? '')
       const artist: MbzArtist = {
         id: item.id,
