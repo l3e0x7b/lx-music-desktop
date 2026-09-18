@@ -19,6 +19,9 @@ import { listInfo, searchState, reset, artistChoiceState } from './state'
 const pageLimit = 30
 const matchTimeout = 8000
 const matchThreshold = 0.6
+// 诊断日志开关：仅开发环境输出。常量须定义在本模块内（DefinePlugin 文本替换 + 同模块作用域内
+// 常量折叠），生产包经 terser 摇树移除各调用点，日志字符串不进入生产包；跨模块共享常量无法折叠
+const isDebug = process.env.NODE_ENV === 'development'
 /** 艺术家缓存上限（超出淘汰最早插入项） */
 const ARTIST_CACHE_MAX = 100
 /** 平台匹配结果缓存上限 */
@@ -51,6 +54,8 @@ const artistNegativeCache = new Map<string, number>()
 
 /** 当前搜索的中断控制器：新搜索或组件卸载（切换页面/取消勾选）时中止前一个，停止 MB 拉取与结果缓存 */
 let currentSearchController: AbortController | null = null
+/** 重进搜索页补武装补拉的控制器：abortSearch/search('') 时一并中止，停止 store 刷新 */
+let ensureRefillController: AbortController | null = null
 
 /**
  * 打开艺术家选择下拉（重名候选）：写入 artistChoiceState，等待 UI 端 resolveArtistChoice 结算
@@ -79,11 +84,53 @@ export const closeArtistChoice = () => {
 }
 
 /** 中止当前 mbz 搜索（组件卸载时调用；中止后不更新 UI、不写缓存）。
- * mbz 模式结束（取消勾选/切源到全部/切类型）时同时停止后台自动补拉循环 */
+ * mbz 模式结束（取消勾选/切源到全部/切类型）时同时停止后台自动补拉循环与补武装刷新 */
 export const abortSearch = () => {
   closeArtistChoice()
   currentSearchController?.abort()
+  ensureRefillController?.abort()
   cancelAllRefills()
+}
+
+/**
+ * 重进搜索页且上次搜索结果不完整（partialFailed）时，重新武装自动补拉循环并刷新状态：
+ * 重读缓存（命中零请求；未缓存则触发一次网络重拉，交由补拉循环补全）；
+ * 补拉完成后经 refilled 信号重读缓存收敛叹号/列表/summary（复用 searchKey 守卫）。
+ * 中止（abortSearch/新的 ensureRefill）或搜索状态变化（新搜索/清空）后不再刷新 store
+ */
+export const ensureRefill = async(): Promise<void> => {
+  const artistId = searchState.artistMbid
+  if (!artistId) return
+  ensureRefillController?.abort()
+  const controller = new AbortController()
+  ensureRefillController = controller
+  const key = searchState.searchKey
+  const result = await getArtistDiscography(artistId, undefined, controller.signal).catch(() => null)
+  if (controller.signal.aborted || ensureRefillController !== controller || !result) return
+  if (searchState.searchKey != key) return
+  searchState.partialFailed = result.failedPages > 0 || result.failedOrphans > 0
+  if (!searchState.partialFailed) {
+    // 缓存已完整（此前补拉完成于组件卸载后，叹号未收敛）：收敛叹号并刷新列表/summary
+    if (lastResultKey === listInfo.key && lastResult !== result) {
+      lastResult = result
+      searchState.groupTotal = result.groupTotal
+      listInfo.list = result.groups.map(group => toMbzGroupMusicInfo(group, lastSource))
+    }
+    return
+  }
+  // 不完整：startRefillLoop 已由 getArtistDiscography 重新武装（refilled 字段）；挂完成回调
+  void result.refilled.then(async() => {
+    if (controller.signal.aborted || ensureRefillController !== controller) return
+    if (searchState.searchKey != key) return
+    const fresh = await getArtistDiscography(artistId, undefined, controller.signal).catch(() => null)
+    if (controller.signal.aborted || ensureRefillController !== controller || !fresh) return
+    if (searchState.searchKey != key) return
+    searchState.partialFailed = fresh.failedPages > 0 || fresh.failedOrphans > 0
+    if (lastResultKey !== listInfo.key) return
+    lastResult = fresh
+    searchState.groupTotal = fresh.groupTotal
+    listInfo.list = fresh.groups.map(group => toMbzGroupMusicInfo(group, lastSource))
+  })
 }
 
 const intervalToSecond = (interval: string | null | undefined): number => {
@@ -178,7 +225,7 @@ const matchCandidate = async(candidate: MbzCandidate, source: LX.OnlineSource): 
     if (!match) return null
     return markRaw(toNewMusicInfo(match))
   } catch (error) {
-    console.log(error)
+    isDebug && console.log(error)
     return null
   } finally {
     clearTimeout(timer)
@@ -269,6 +316,8 @@ const toMbzGroupMusicInfo = (group: MbzGroupFull, source: LX.OnlineSource): LX.M
       },
     },
   }
+  // 组行 meta 不满足 MusicInfoOnline 的完整契约（无平台必填的 qualitys/_qualitys，
+  // 组行模板不渲染音质徽章），需双断言绕过类型检查；接入方勿读组行占位的平台字段
   return markRaw(info) as unknown as LX.Music.MusicInfo
 }
 
@@ -327,6 +376,8 @@ const getArtistCandidates = async(text: string, signal?: AbortSignal): Promise<M
   const task = (async() => {
     const artists = await findArtistCandidates(text)
     if (artists.length) {
+      // 先 delete 再 set（真 LRU）：TTL 过期后重设现有 key 不更新插入顺序，会被当作「最早插入」淘汰
+      artistCandidatesCache.delete(text)
       artistCandidatesCache.set(text, { candidates: artists, at: Date.now() })
       if (artistCandidatesCache.size > ARTIST_CACHE_MAX) {
         const oldest = artistCandidatesCache.keys().next().value
@@ -334,6 +385,7 @@ const getArtistCandidates = async(text: string, signal?: AbortSignal): Promise<M
       }
       artistNegativeCache.delete(text)
     } else {
+      artistNegativeCache.delete(text)
       artistNegativeCache.set(text, Date.now())
       if (artistNegativeCache.size > ARTIST_CACHE_MAX) {
         const oldest = artistNegativeCache.keys().next().value
@@ -354,10 +406,11 @@ const getArtistCandidates = async(text: string, signal?: AbortSignal): Promise<M
 
 export const search = async(text: string, source: LX.OnlineSource, page: number): Promise<LX.Music.MusicInfo[]> => {
   if (!text) {
-    // 清空搜索框（v-show 隐藏，组件不卸载）：中止进行中的拉取 + 后台自动补拉循环，
+    // 清空搜索框（v-show 隐藏，组件不卸载）：中止进行中的拉取 + 后台自动补拉循环 + 补武装刷新，
     // 并关闭可能打开的艺术家选择弹窗；同时清空已选艺术家记忆——用户清空后重搜同词应重新弹选择器，而非沿用旧选择
     closeArtistChoice()
     currentSearchController?.abort()
+    ensureRefillController?.abort()
     cancelAllRefills()
     chosenArtistCache.clear()
     reset()
@@ -425,7 +478,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
       }
       return []
     }
-    console.log(error)
+    isDebug && console.log(error)
     loadFailed = true
   }
   if (searchState.searchKey != key) {
@@ -434,9 +487,6 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   }
   if (!artist) {
     listInfo.list = []
-    listInfo.total = 0
-    listInfo.page = 1
-    listInfo.maxPage = 0
     listInfo.key = null
     listInfo.noItemLabel = window.i18n.t(loadFailed ? 'search__mbz_load_failed' : 'search__mbz_no_artist')
     searchState.isSearching = false
@@ -461,7 +511,7 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
       }
       return []
     }
-    console.log(error)
+    isDebug && console.log(error)
   }
   if (searchState.searchKey != key) {
     // 本搜索已过期（searchKey 已变化，说明存在更新的搜索或 reset）：isSearching 由更新的搜索（或 reset）负责复位，此处不干预
@@ -469,9 +519,6 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   }
   if (!result) {
     listInfo.list = []
-    listInfo.total = 0
-    listInfo.page = 1
-    listInfo.maxPage = 0
     listInfo.key = null
     listInfo.noItemLabel = window.i18n.t('search__mbz_load_failed')
     searchState.isSearching = false
@@ -482,12 +529,9 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
   lastSource = source
   searchState.groupTotal = result.groupTotal
   searchState.artistMbid = artist.id
-  // 全量作品集行（不分页）：版本与曲目由用户在界面上展开/选择
+  // 全量作品集行（不分页）：版本与曲目由用户在界面上展开/选择；组数唯一真源为 searchState.groupTotal
   const list = result.groups.map(group => toMbzGroupMusicInfo(group, source))
   listInfo.list = list
-  listInfo.total = result.groupTotal
-  listInfo.page = 1
-  listInfo.maxPage = 1
   listInfo.key = key
   listInfo.noItemLabel = list.length
     ? ''
@@ -512,7 +556,6 @@ export const search = async(text: string, source: LX.OnlineSource, page: number)
       searchState.groupTotal = fresh.groupTotal
       const freshList = fresh.groups.map(group => toMbzGroupMusicInfo(group, source))
       listInfo.list = freshList
-      listInfo.total = fresh.groupTotal
     })
   }
   return list

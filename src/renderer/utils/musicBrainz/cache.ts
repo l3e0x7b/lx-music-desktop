@@ -3,6 +3,10 @@
  * 搜索顺序：内存 → 落盘 → 网络；TTL 过期自动重拉；读写失败静默回退网络
  */
 
+// 诊断日志开关：仅开发环境输出。常量须定义在本模块内（DefinePlugin 文本替换 + 同模块作用域内
+// 常量折叠），生产包经 terser 摇树移除各调用点，日志字符串不进入生产包；跨模块共享常量无法折叠
+const isDebug = process.env.NODE_ENV === 'development'
+
 export const CACHE_TTL_MS = 3 * 24 * 3600 * 1000
 /** 缓存数据结构版本，聚合逻辑变更时递增以废弃旧缓存。
  * 9→10：官方发行判定口径修正（仅 Official），废弃曾计入 Withdrawn/全空组的旧缓存。 */
@@ -88,6 +92,8 @@ export declare interface DiscographyPersist {
   failedPages?: number
   /** 拉取时孤儿组检查失败的组数（>0 表示部分孤儿组缺失；命中后由后台补拉补齐，不阻断缓存准入） */
   failedOrphans?: number
+  /** 近似体积（JSON 序列化长度；由 cacheSave 写入时计算，容量治理直接读取，避免读取时全量序列化） */
+  size?: number
 }
 
 const DB_NAME = 'lx-music-desktop'
@@ -154,7 +160,7 @@ export const cacheGet = async(artistId: string): Promise<DiscographyPersist | nu
     }
     return data
   } catch (error) {
-    console.log(error)
+    isDebug && console.log(error)
     return null
   }
 }
@@ -163,10 +169,12 @@ export const cacheSave = async(payload: DiscographyPersist): Promise<void> => {
   try {
     const db = await openDB()
     if (!db) return
-    await transactionDone(db, 'readwrite', store => store.put({ ...payload, version: CACHE_VERSION }))
+    // 体积在写入时计算（仅序列化本次单条）；容量治理直接读取该字段，
+    // 消除每次保存对全部条目的全量序列化成本（渲染进程主线程同步执行，大缓存可达数百毫秒）
+    await transactionDone(db, 'readwrite', store => store.put({ ...payload, version: CACHE_VERSION, size: estimateSize(payload) }))
     await enforceDiskLimit(db)
   } catch (error) {
-    console.log(error)
+    isDebug && console.log(error)
   }
 }
 
@@ -177,8 +185,9 @@ export const cacheSave = async(payload: DiscographyPersist): Promise<void> => {
 const enforceDiskLimit = async(db: IDBDatabase): Promise<void> => {
   try {
     const all = await dbRequest<DiscographyPersist[]>(db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll())
+    // 体积优先读写入时计算的 size 字段（旧条目缺失时回退实时估算）
     const sized = all
-      .map(item => ({ id: item.artistId, fetchedAt: item.fetchedAt ?? 0, size: estimateSize(item) }))
+      .map(item => ({ id: item.artistId, fetchedAt: item.fetchedAt ?? 0, size: item.size ?? estimateSize(item) }))
       .sort((a, b) => a.fetchedAt - b.fetchedAt)
     let total = sized.reduce((sum, item) => sum + item.size, 0)
     if (total <= DISK_CACHE_MAX_BYTES) return
@@ -194,7 +203,7 @@ const enforceDiskLimit = async(db: IDBDatabase): Promise<void> => {
       })
     }
   } catch (error) {
-    console.log(error)
+    isDebug && console.log(error)
   }
 }
 
@@ -212,7 +221,7 @@ export const cacheDelete = async(artistId: string): Promise<void> => {
     if (!db) return
     await transactionDone(db, 'readwrite', store => store.delete(artistId))
   } catch (error) {
-    console.log(error)
+    isDebug && console.log(error)
   }
 }
 
@@ -223,6 +232,6 @@ export const cacheClearAll = async(): Promise<void> => {
     if (!db) return
     await transactionDone(db, 'readwrite', store => store.clear())
   } catch (error) {
-    console.log(error)
+    isDebug && console.log(error)
   }
 }

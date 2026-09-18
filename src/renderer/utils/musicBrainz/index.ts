@@ -2,6 +2,10 @@ import { httpFetch } from '../request'
 import { requestMsg } from '../message'
 import { cacheGet, cacheSave, cacheClearAll, type DiscographyPersist, type MbzGroupRaw, type MbzReleaseRaw } from './cache'
 
+// 诊断日志开关：仅开发环境输出。常量须定义在本模块内（DefinePlugin 文本替换 + 同模块作用域内
+// 常量折叠），生产包经 terser 摇树移除各调用点，日志字符串不进入生产包；跨模块共享常量无法折叠
+const isDebug = process.env.NODE_ENV === 'development'
+
 const baseUrl = 'https://musicbrainz.org/ws/2'
 const PAGE_LIMIT = 100
 /** browse 带 recordings 内联时服务端按响应体积截断，实际页大小约 25~40；仅用于进度预估 */
@@ -168,7 +172,7 @@ export interface MbzArtist {
   gender: string
   /** 地区名（如 Hong Kong/Taiwan） */
   area: string
-  /** 出道/成立时间（life-span.begin 或 begin.year，如 1969-08-08 / 1930） */
+  /** 出道/成立时间（life-span.begin，如 1969-08-08） */
   begin: string
   /** 匹配得分：名称全等 +3；否则 名称包含 +1 / 别名全等 +2；rank>=2 视为与搜索词全等命中（重名判定用）。
    * 名称全等时不再叠加别名全等分（别名多为名称的大小写变体，双计会把同分档艺人挤到首位、
@@ -270,6 +274,9 @@ const artistCache = new Map<string, DiscographyCache>()
 const ARTIST_CACHE_MAX = 10
 
 const artistCacheSet = (artistId: string, cache: DiscographyCache) => {
+  // 先 delete 再 set（真 LRU）：Map.set 对已存在的 key 只更新值、不改变插入顺序，
+  // 补拉重设现有条目时其仍会被当作「最早插入」淘汰（刚刷新的数据被挤出，下次搜索又需重拉）
+  artistCache.delete(artistId)
   artistCache.set(artistId, cache)
   if (artistCache.size > ARTIST_CACHE_MAX) {
     const oldest = artistCache.keys().next().value
@@ -582,7 +589,7 @@ const browseAllPages = async <T,>(
       items = page.items
       count = page.count
     } catch (error) {
-      console.log('[mbz] page failed:', (error as Error)?.message ?? error)
+      isDebug && console.log('[mbz] page failed:', (error as Error)?.message ?? error)
       failedOffsets.add(offset)
       // 连续失败熔断：total 未知（无任何成功页）或持续繁忙时主循环没有自然出口，
       // 达上限即 break 终止本链——已收集数据保留，缺失计入 failedPages 由后台补拉承接
@@ -619,7 +626,7 @@ const checkGroupOfficial = async(groupId: string): Promise<MbzReleaseRaw[] | nul
     return body?.releases as MbzReleaseRaw[] ?? []
   } catch (error) {
     if ((error as Error)?.name === 'AbortError') throw error
-    console.log('[mbz] orphan check failed:', (error as Error)?.message ?? error)
+    isDebug && console.log('[mbz] orphan check failed:', (error as Error)?.message ?? error)
     return null
   }
 }
@@ -762,7 +769,7 @@ const fetchDiscography = async(artistId: string, onProgress?: (done: number, tot
       // Promise.all 提前拒绝后其余 worker 的 AbortError 将无人消费，静默避免 unhandled rejection，
       // 中止语义由 Promise.all 之后的 signal 复查保证
       await Promise.all(Array.from({ length: Math.min(ORPHAN_CHECK_CONCURRENCY, orphans.length) }, async() => worker().catch(error => {
-        if ((error as Error)?.name != 'AbortError') console.log(error)
+        if ((error as Error)?.name != 'AbortError') isDebug && console.log(error)
       })))
       if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError')
       if (checked < orphans.length) {
@@ -893,6 +900,9 @@ const loadDiscography = async(artistId: string, onProgress?: (done: number, tota
         // 孤儿组失败单独计数，不阻断缓存准入（主数据页完整即可缓存），但已持久化供补拉判定。
         if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
           artistCacheSet(artistId, cache)
+          // 曲目提取缓存键为 (groupId, releaseId) 不含 artistId，无法按 artist 精确清理；
+          // 数据刷新后全清，旧曲目行（重拉前内容）不再复用，其它艺人展开时重新 extractTracks（亚秒级本地计算）
+          groupTracksCache.clear()
           // 有效数据落盘缓存（空结果不缓存，避免阻隔下次重试）
           if (payload.releases.length) {
             await cacheSave({
@@ -989,6 +999,8 @@ const startRefillLoop = async(artistId: string): Promise<void> => {
       // 孤儿失败单独计数，不阻断覆盖（主数据页完整即可写缓存）
       if (payload.failedPages <= PARTIAL_CACHE_MAX_FAILED_PAGES) {
         artistCacheSet(artistId, cache)
+        // 与主趟同理：数据刷新后全清曲目提取缓存，避免展开时复用重拉前的旧曲目行
+        groupTracksCache.clear()
         if (payload.releases.length) {
           await cacheSave({
             artistId,
@@ -1016,7 +1028,7 @@ const startRefillLoop = async(artistId: string): Promise<void> => {
         finish()
         return
       }
-      console.log('[mbz] refill failed:', (error as Error)?.message ?? error)
+      isDebug && console.log('[mbz] refill failed:', (error as Error)?.message ?? error)
       if (controller.signal.aborted) {
         finish()
         return
@@ -1053,7 +1065,7 @@ export const cancelAllRefills = () => {
  * 按 release-group 聚合，仅保留含 Official release 的作品集）
  * 数据来源顺序：内存缓存 → IndexedDB 落盘缓存（TTL 3 天）→ 网络拉取
  * @param artistId MusicBrainz 艺术家 MBID
- * @param onProgress 进度回调（已拉页数, 预估页数）
+ * @param onProgress 进度回调（已确认官方作品集数, 总作品集数）
  * @param signal 中断信号：中止时停止拉取并抛 AbortError（调用方静默处理，结果不入缓存）
  * @returns 全量排序后的作品集（含各版本数据）与状态
  */

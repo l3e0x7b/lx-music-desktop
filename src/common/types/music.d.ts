@@ -47,7 +47,7 @@ declare namespace LX {
           date: string | null
           country: string | null
           format: string | null
-          trackCount: string | null // 各媒体曲目数原始展示（如 "10+7"）
+          trackCount: string // 各媒体曲目数原始展示（如 "10+7"，无媒体为空串）
           label: string | null
           catalog: string | null
           barcode: string | null

@@ -1,12 +1,9 @@
 import { reactive } from '@common/utils/vueTools'
 import type { MbzArtist } from '@renderer/utils/musicBrainz'
 
+/** mbz 已不分页：组数唯一真源为 searchState.groupTotal，此处仅存展示列表与状态标识 */
 export declare interface MbzListInfo {
   list: LX.Music.MusicInfo[]
-  total: number
-  page: number
-  maxPage: number
-  limit: number
   key: string | null
   noItemLabel: string
 }
@@ -29,10 +26,6 @@ export declare interface MbzSearchState {
 }
 
 export const listInfo: MbzListInfo = reactive({
-  page: 1,
-  maxPage: 0,
-  limit: 30,
-  total: 0,
   list: [],
   key: null,
   noItemLabel: '',
@@ -68,9 +61,6 @@ export const artistChoiceState: MbzArtistChoiceState = reactive({
 
 export const reset = () => {
   listInfo.list = []
-  listInfo.page = 1
-  listInfo.maxPage = 0
-  listInfo.total = 0
   listInfo.key = null
   listInfo.noItemLabel = ''
   searchState.isSearching = false

@@ -10,8 +10,8 @@
       <material-online-list
         ref="listRef"
         :page="1"
-        :limit="listInfo.limit"
-        :total="listInfo.total"
+        :limit="30"
+        :total="searchState.groupTotal ?? 0"
         :list="displayList"
         :no-item="listInfo.noItemLabel"
         :resolve-placeholder="resolvePlaceholder"
@@ -29,7 +29,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from '@common/utils/vueTools'
 import { searchText } from '@renderer/store/search/state'
-import { listInfo, searchState, buildGroupTracks } from '@renderer/store/search/mbz'
+import { listInfo, searchState, buildGroupTracks, ensureRefill } from '@renderer/store/search/mbz'
 import useList from './useList'
 
 interface Props {
@@ -119,7 +119,12 @@ watch([() => props.sourceId, () => props.page, searchText], ([sourceId, page, te
   // 切页后重挂载：已有结果（listInfo.key 命中）或仍在后台拉取（searchState.searchKey 命中且 isSearching）
   // 时都不重发——后台拉取继续完成并回填 store，返回秒回不重启搜索
   const key = `${page || 1}__${sourceId}__${text}`
-  if (text && (listInfo.key === key || (searchState.searchKey === key && searchState.isSearching))) return
+  if (text && (listInfo.key === key || (searchState.searchKey === key && searchState.isSearching))) {
+    // 上次结果不完整（partialFailed）时重新武装自动补拉循环（重读缓存零请求）：
+    // 取消勾选会终止补拉循环，重进后需重新武装，使叹号语义与补拉行为恢复一致
+    if (searchState.partialFailed) void ensureRefill()
+    return
+  }
   searchTimer = setTimeout(() => {
     search(text || '', sourceId, page || 1)
   })
