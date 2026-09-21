@@ -19,6 +19,8 @@ import { listInfo, searchState, reset, artistChoiceState } from './state'
 const pageLimit = 30
 const matchTimeout = 8000
 const matchThreshold = 0.6
+/** 匹配失败后尝试的同曲跨版本变体上限（同一录音在其他版本中的标题/署名变体，见 collectVariants） */
+const maxMatchVariants = 4
 // 诊断日志开关：仅开发环境输出。常量须定义在本模块内（DefinePlugin 文本替换 + 同模块作用域内
 // 常量折叠），生产包经 terser 摇树移除各调用点，日志字符串不进入生产包；跨模块共享常量无法折叠
 const isDebug = process.env.NODE_ENV === 'development'
@@ -209,7 +211,8 @@ const findBestMatch = (items: any[], candidate: MbzCandidate): any => {
   return bestScore >= matchThreshold ? best : null
 }
 
-const matchCandidate = async(candidate: MbzCandidate, source: LX.OnlineSource): Promise<LX.Music.MusicInfo | null> => {
+/** 单次平台查询匹配：以传入候选的标题/署名构造搜索词并评分，返回首个达标的平台曲目 */
+const searchOnce = async(candidate: MbzCandidate, source: LX.OnlineSource): Promise<LX.Music.MusicInfo | null> => {
   const query = `${candidate.title} ${candidate.artists[0] || ''}`.trim()
   // 平台 musicSearch SDK 无取消句柄：超时后仅放弃结果（searchTask 后台继续跑至平台自身超时）。
   // 残余请求为每个失败匹配 1 个，占用平台 API 额度有限，可接受。
@@ -230,6 +233,47 @@ const matchCandidate = async(candidate: MbzCandidate, source: LX.OnlineSource): 
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * 收集同一作品集其他版本中同一录音（recording MBID 相同）的标题/署名变体：
+ * 版本本地化差异（如日文版日文原名 / TW 版中文译名）是非简体中文标题匹配失败的主因，
+ * 变体与原曲为同一录音（同一首歌），不会引入翻唱/他人同名曲；
+ * 每个变体为完整候选（含各版本 artist-credit 署名），独立走 searchOnce 时歌手硬门槛同等生效
+ */
+const collectVariants = (candidate: MbzCandidate): MbzCandidate[] => {
+  // 与 findCandidate 同守卫：旧搜索结果（清空/新搜索后 lastResult 未同步）不产出变体
+  if (lastResultKey !== listInfo.key) return []
+  const group = lastResult?.groups.find(item => item.id == candidate.mbzGroupId)
+  if (!group) return []
+  const seen = new Set([filterStr(candidate.title).toLowerCase()])
+  const chinese: MbzCandidate[] = []
+  const others: MbzCandidate[] = []
+  for (const release of group.releases) {
+    // 当前版本的标题已先行尝试（matchCandidate 原路径），变体只取其他版本
+    if (release.id == candidate.releaseMbid) continue
+    for (const track of groupTracks(group, release.id)) {
+      if (track.mbid != candidate.mbid) continue
+      const key = filterStr(track.title).toLowerCase()
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      // 含汉字标题优先（中文平台多以汉字名收录），其余保持版本序
+      ;(hasChinese(track.title) ? chinese : others).push(track)
+    }
+  }
+  return [...chinese, ...others].slice(0, maxMatchVariants)
+}
+
+const matchCandidate = async(candidate: MbzCandidate, source: LX.OnlineSource): Promise<LX.Music.MusicInfo | null> => {
+  const match = await searchOnce(candidate, source)
+  if (match) return match
+  // 原版本标题未命中：依次尝试同曲跨版本变体，任一命中即返回；
+  // 结果落在原 candidate key 下（matchOnPlay 缓存语义不变，播放/下载/加歌单链路自动全部受益）
+  for (const variant of collectVariants(candidate)) {
+    const result = await searchOnce(variant, source)
+    if (result) return result
+  }
+  return null
 }
 
 /**
